@@ -1,0 +1,1 @@
+SELECT cat_a_s as other_as FROM sample_data PIVOT (sum(value) as s, max(price) FOR category IN ('a' as cat_a, 'b'))

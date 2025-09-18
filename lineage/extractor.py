@@ -201,6 +201,14 @@ class LineageExtractor:
             derived_targets.append(alias or self._expr_display(expr))
 
         # Iterate projection expressions
+        # Pre-compute explicitly projected simple column names (excluding stars) to avoid star duplication
+        explicit_simple_cols: set[str] = set()
+        for p in select_expr.expressions:
+            if isinstance(p, exp.Column):
+                explicit_simple_cols.add(normalize_identifier(p.name))
+            elif isinstance(p, exp.Alias) and isinstance(p.this, exp.Column):
+                explicit_simple_cols.add(normalize_identifier(p.this.name))
+
         for idx, (alias, expr) in enumerate(proj):
             target_col = None
             if target_cols and idx < len(target_cols):
@@ -212,152 +220,108 @@ class LineageExtractor:
             source_cols = list(expr.find_all(exp.Column))
             # Handle SELECT * specially: no Column nodes inside Star, so produce mappings
             if isinstance(expr, exp.Column) and isinstance(expr.this, exp.Identifier) and expr.this.this == '*':
-                # Attempt to attribute to single source table
+                # Improved STAR expansion: respect intermediate CTE projections (do NOT blindly expand to base schema)
                 from_ = select_expr.args.get("from")
-                base: Optional[str] = None
-                # Collect multi tables for join star expansion
-                multi_tables: List[str] = []
-                if from_:
-                    for t in from_.find_all(exp.Table):
-                        tname = table_name_of(t)
-                        if tname:
-                            multi_tables.append(tname)
-                join_nodes = select_expr.args.get("joins") or []
-                for j in join_nodes:
-                    jt = j.this
-                    if isinstance(jt, exp.Table):
-                        tname = table_name_of(jt)
-                        if tname:
-                            multi_tables.append(tname)
-                if from_:
-                    # Prefer direct table name
-                    tables = [t for t in from_.find_all(exp.Table)]
-                    if len(tables) == 1:
-                        tname = table_name_of(tables[0])
+                if not from_:
+                    continue
+                # Detect undefined references
+                for t in from_.find_all(exp.Table):
+                    tname = table_name_of(t)
+                    if tname and tname not in self.schema and tname not in cte_map:
                         try:
-                            self.logger.debug(f"STAR: initial from table name={tname}")
+                            self.logger.warning(f"Potential undefined table/CTE reference: {tname}")
                         except Exception:
                             pass
-                        if tname:
-                            # If table is a CTE, walk into it to find inner base table when unambiguous
-                            seen = set()
-                            cur = tname
-                            while cur in cte_map and cur not in seen:
-                                seen.add(cur)
-                                inner = cte_map[cur]
-                                inner_select = inner.this if isinstance(inner, exp.With) else inner
-                                if not isinstance(inner_select, exp.Select):
-                                    break
-                                inner_from = inner_select.args.get("from")
-                                if not inner_from or (inner_select.args.get("joins") or []):
-                                    break
-                                inner_tables = [table_name_of(t) for t in inner_from.find_all(exp.Table)]
-                                inner_tables = [it for it in inner_tables if it]
-                                try:
-                                    self.logger.debug(f"STAR: walking CTE cur={cur}, inner_tables={inner_tables}")
-                                except Exception:
-                                    pass
-                                if len(inner_tables) != 1:
-                                    break
-                                cur = inner_tables[0]
-                            if cur and cur not in cte_map:
-                                base = cur
-                                try:
-                                    self.logger.debug(f"STAR: resolved base via CTE chain -> {base}")
-                                except Exception:
-                                    pass
-                            if not base:
-                                # If still ambiguous, fall back to original name
-                                base = tname
-                                try:
-                                    self.logger.debug(f"STAR: fallback base -> {base}")
-                                except Exception:
-                                    pass
-                            else:
-                                base = tname
-                try:
-                    self.logger.debug(f"STAR: final base={base}")
-                except Exception:
-                    pass
-                # Multi-table star expansion using schema when available
-                if len(multi_tables) > 1 and self.schema:
+                # Gather all tables (FROM + JOINs)
+                multi_tables: List[str] = []
+                for t in from_.find_all(exp.Table):
+                    tn = table_name_of(t)
+                    if tn:
+                        multi_tables.append(tn)
+                for j in (select_expr.args.get("joins") or []):
+                    jt = j.this
+                    if isinstance(jt, exp.Table):
+                        tn = table_name_of(jt)
+                        if tn:
+                            multi_tables.append(tn)
+                # If more than one base table and no single CTE indirection, use schema-based expansion per table
+                if len(set(multi_tables)) > 1:
                     emitted = False
                     for bt in multi_tables:
                         cols = self.schema.get(bt, [])
                         if cols:
                             for c in cols:
-                                recs.append(
-                                    LineageRecord(
-                                        source_table=bt,
-                                        source_column=normalize_identifier(c),
-                                        expression='*',
-                                        target_column=None,
-                                        target_table=target_table,
-                                        file=file,
-                                        engine=self.engine,
-                                    )
-                                )
-                                emitted = True
-                    if emitted:
-                        continue
-                if base:
-                    # If base is a CTE name, try to walk through to underlying base table
-                    if base in cte_map:
-                        seen2 = set()
-                        cur2 = base
-                        while cur2 in cte_map and cur2 not in seen2:
-                            seen2.add(cur2)
-                            inner = cte_map[cur2]
-                            inner_select = inner.this if isinstance(inner, exp.With) else inner
-                            if not isinstance(inner_select, exp.Select):
-                                break
-                            inner_from = inner_select.args.get("from")
-                            if not inner_from or (inner_select.args.get("joins") or []):
-                                break
-                            inner_tables = [table_name_of(t) for t in inner_from.find_all(exp.Table)]
-                            inner_tables = [it for it in inner_tables if it]
-                            if len(inner_tables) != 1:
-                                break
-                            cur2 = inner_tables[0]
-                        if cur2 and cur2 not in cte_map:
-                            base = cur2
-                    # Use schema to expand columns if available
-                    cols = []
-                    if isinstance(self.schema, dict):
-                        # Exact match
-                        cols = self.schema.get(base, [])
-                        if not cols:
-                            # Try matching by short name
-                            short = base.split('.')[-1]
-                            for k, v in self.schema.items():
-                                if k.endswith('.' + short) or k == short:
-                                    cols = v
-                                    break
-                    if cols:
-                        for c in cols:
-                            recs.append(
-                                LineageRecord(
-                                    source_table=base,
+                                if normalize_identifier(c) in explicit_simple_cols:
+                                    continue
+                                recs.append(LineageRecord(
+                                    source_table=bt,
                                     source_column=normalize_identifier(c),
                                     expression='*',
                                     target_column=None,
                                     target_table=target_table,
                                     file=file,
                                     engine=self.engine,
-                                )
-                            )
-                    else:
-                        recs.append(
-                            LineageRecord(
-                                source_table=base,
-                                source_column='*',
-                                expression='*',
-                                target_column=None,
-                                target_table=target_table,
-                                file=file,
-                                engine=self.engine,
-                            )
-                        )
+                                ))
+                                emitted = True
+                    if emitted:
+                        continue
+                # Single source table or CTE
+                tables = [t for t in from_.find_all(exp.Table)]
+                if len(tables) != 1:
+                    # Fall back – unresolved star
+                    recs.append(LineageRecord(
+                        source_table=None,
+                        source_column='*',
+                        expression='*',
+                        target_column=None,
+                        target_table=target_table,
+                        file=file,
+                        engine=self.engine,
+                    ))
+                    continue
+                single_name = table_name_of(tables[0])
+                if not single_name:
+                    continue
+                # If it's a CTE, enumerate its effective output columns honoring projection pruning/aliasing
+                if single_name in cte_map:
+                    for st, sc in self._enumerate_cte_output_sources(single_name, cte_map, set()):
+                        if sc in explicit_simple_cols:
+                            continue
+                        recs.append(LineageRecord(
+                            source_table=st,
+                            source_column=sc,
+                            expression='*',
+                            target_column=None,
+                            target_table=target_table,
+                            file=file,
+                            engine=self.engine,
+                        ))
+                    continue
+                # Base table: expand via schema if available
+                cols = self.schema.get(single_name, [])
+                if cols:
+                    for c in cols:
+                        if normalize_identifier(c) in explicit_simple_cols:
+                            continue
+                        recs.append(LineageRecord(
+                            source_table=single_name,
+                            source_column=normalize_identifier(c),
+                            expression='*',
+                            target_column=None,
+                            target_table=target_table,
+                            file=file,
+                            engine=self.engine,
+                        ))
+                else:
+                    recs.append(LineageRecord(
+                        source_table=single_name,
+                        source_column='*',
+                        expression='*',
+                        target_column=None,
+                        target_table=target_table,
+                        file=file,
+                        engine=self.engine,
+                    ))
                 continue
             if not source_cols:
                 # Expression without column reference (e.g., literal)
@@ -798,3 +762,122 @@ class LineageExtractor:
                 if alias:
                     mapping[alias] = proj.this
         return mapping
+
+    def _resolve_cte_base(self, cte_name: str, cte_map: Dict[str, exp.Expression]) -> str:
+        """Walk a chain of CTEs to find an ultimate base table name.
+
+        If the chain ends in a SELECT with exactly one table in FROM (no joins) and no further CTE indirections, return that table name.
+        Otherwise return the last resolvable name (may be the original CTE name).
+        """
+        seen: set[str] = set()
+        current = cte_name
+        while current in cte_map and current not in seen:
+            seen.add(current)
+            node = cte_map[current]
+            # Unwrap WITH inside CTE definition
+            inner = node.this if isinstance(node, exp.With) else node
+            if not isinstance(inner, exp.Select):
+                break
+            from_ = inner.args.get("from")
+            if not from_:
+                break
+            tables = [table_name_of(t) for t in from_.find_all(exp.Table)]
+            tables = [t for t in tables if t]
+            joins = inner.args.get("joins") or []
+            # If single table and no joins, attempt to follow if that table is itself a CTE
+            if len(tables) == 1 and not joins:
+                nxt = tables[0]
+                if nxt in cte_map and nxt not in seen:
+                    current = nxt
+                    continue
+                # Reached a base table
+                return nxt
+            break
+        return current
+
+    def _enumerate_cte_output_sources(self, cte_name: str, cte_map: Dict[str, exp.Expression], visited: set) -> List[Tuple[str, str]]:
+        """Return list of (source_table, source_column) for the visible output columns of a CTE.
+
+        This walks through chains of CTEs when the CTE body is a simple SELECT * from another CTE,
+        but STOPS when:
+          * Projection lists explicit columns (with or without aliases)
+          * Multiple base tables (joins) appear
+          * UNION appears
+
+        For explicit projections, each projected column's lineage is resolved via existing column resolution logic.
+        """
+        if cte_name in visited:
+            return []
+        visited.add(cte_name)
+        node = cte_map.get(cte_name)
+        if not node:
+            return []
+        inner = node.this if isinstance(node, exp.With) else node
+        if not isinstance(inner, exp.Select):
+            return []
+        # If UNION inside, gather both sides separately (treat as ambiguous set of sources)
+        if isinstance(inner, exp.Union):
+            out: List[Tuple[str, str]] = []
+            for part in self._get_select_parts(inner):
+                if isinstance(part, exp.Select):
+                    out.extend(self._enumerate_select_output_sources(part, cte_map, visited))
+            return out
+        return self._enumerate_select_output_sources(inner, cte_map, visited)
+
+    def _enumerate_select_output_sources(self, select_expr: exp.Select, cte_map: Dict[str, exp.Expression], visited: set) -> List[Tuple[str, str]]:
+        out: List[Tuple[str, str]] = []
+        # If projection is STAR only and single table source that is a CTE -> recurse
+        star_only = all(isinstance(p, (exp.Star,)) for p in select_expr.expressions)
+        from_ = select_expr.args.get("from")
+        joins = select_expr.args.get("joins") or []
+        base_tables = []
+        if from_:
+            for t in from_.find_all(exp.Table):
+                tn = table_name_of(t)
+                if tn:
+                    base_tables.append(tn)
+        # Simple chain case
+        if star_only and len(base_tables) == 1 and not joins:
+            base = base_tables[0]
+            if base in cte_map:
+                return self._enumerate_cte_output_sources(base, cte_map, visited)
+            # Base physical table
+            cols = self.schema.get(base, [])
+            if cols:
+                return [(base, normalize_identifier(c)) for c in cols]
+            return [(base, '*')]
+        # Explicit projections: resolve each column expression lineage
+        proj_map = self._projection_name_to_expr(select_expr)
+        for proj in select_expr.expressions:
+            if isinstance(proj, exp.Star):
+                # STAR among explicit columns: expand relative to single table if possible else skip (handled earlier)
+                if len(base_tables) == 1 and not joins:
+                    base = base_tables[0]
+                    if base in cte_map:
+                        out.extend(self._enumerate_cte_output_sources(base, cte_map, visited))
+                    else:
+                        cols = self.schema.get(base, [])
+                        if cols:
+                            out.extend([(base, normalize_identifier(c)) for c in cols])
+                        else:
+                            out.append((base, '*'))
+                continue
+            expr = proj.this if isinstance(proj, exp.Alias) else proj
+            alias = normalize_identifier(proj.alias) if isinstance(proj, exp.Alias) else None
+            # Collect columns inside expr
+            cols = list(expr.find_all(exp.Column))
+            if not cols:
+                continue
+            temp_select = select_expr  # reuse scope for resolution
+            for c in cols:
+                for st, sc in self._resolve_column_sources(temp_select, c, cte_map, proj_map):
+                    if st and sc:
+                        out.append((st, sc))
+        # Deduplicate preserving order
+        seen_pairs = set()
+        dedup: List[Tuple[str, str]] = []
+        for p in out:
+            if p not in seen_pairs:
+                seen_pairs.add(p)
+                dedup.append(p)
+        return dedup

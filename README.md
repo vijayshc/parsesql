@@ -138,6 +138,29 @@ orders,total_amount,total_amount,total_amount,
 - Window functions (ROW_NUMBER, RANK, etc.)
 - WHERE, GROUP BY, ORDER BY clauses
 
+## Deep CTE Lineage & Star Semantics
+
+The extractor performs multi-level CTE analysis to ensure `SELECT *` only expands to the columns that are actually visible at the final query boundary:
+
+1. CTE Chain Unwinding: Chains like `lvl5 -> lvl4 -> lvl3 -> lvl2 -> lvl1 -> base` are walked top‑down. Expansion stops when an intermediate CTE introduces an explicit projection (column list, aliases, expressions) or a join/multi-source pattern.
+2. Projection Pruning Preservation: Columns dropped in any intermediate CTE are never reintroduced during later `*` expansion. Example: If `last_name` and `status` are removed at `lvl2`, a later `SELECT * FROM lvl5` will not emit them.
+3. Join Awareness: When a `SELECT *` sits atop a CTE whose body joins multiple sources, expansion emits (when schema is available) the union of projected columns from each underlying side, not the full base table schemas.
+4. Expression Aliases: For derived columns (e.g., `total_amount * 0.1 AS tax`), a downstream `SELECT *` over a CTE that already projected `tax` contributes only the physical source columns actually required (here: `orders.total_amount`). It does not duplicate the derived alias as a “source column”; instead it traces back to the physical origin(s).
+5. Duplicate Suppression with Mixed Projections: In patterns like `SELECT col_a, *, col_a FROM some_cte`, the `*` expansion will suppress `col_a` because it is already explicitly projected, avoiding redundant lineage rows.
+6. Ambiguity Handling: If a `*` spans multiple tables and schema metadata is present, the expansion enumerates concrete columns per table. Without schema, a conservative single `*` placeholder record is emitted.
+7. Undefined Reference Warning: If a final `FROM` references a name that is neither a known table (per schema) nor a defined CTE, a warning is logged to aid in catching typos early.
+
+### Practical Examples
+
+| Scenario | Input Pattern | Output Behavior |
+|----------|---------------|-----------------|
+| CTE pruning | `base -> lvl1(project subset) -> SELECT *` | Only subset columns appear |
+| Expression alias | `metrics AS (amount, amount*0.1 tax)` then `SELECT * FROM metrics` | Underlying physical column `amount` traced; no phantom columns |
+| Join inside CTE | `joined AS (o JOIN c)` then `SELECT * FROM joined` | Columns attributed to each side (`orders_base.*`, `cust_base.*`) not inflated beyond projection |
+| Mixed star & explicit | `SELECT id, *, name` | Single lineage rows for `id` and `name` (star suppressed duplicates) |
+
+This approach maximizes accuracy while preventing over-reporting columns that are not actually part of the user-visible result set.
+
 ## Accuracy and Limitations
 
 - Resolves unqualified columns using schema when available

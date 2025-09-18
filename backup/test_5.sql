@@ -1,0 +1,1 @@
+SELECT a FROM y JOIN z ON y.uid = z.uid

@@ -1,0 +1,1 @@
+INSERT INTO target (x, y) SELECT subq.x, subq.y FROM (SELECT t.x AS x, TO_DATE('2023-12-19', 'YYYY-MM-DD') AS y FROM s.t t WHERE 1 = 1 AND y = TO_DATE('2023-12-19', 'YYYY-MM-DD')) subq

@@ -1,0 +1,1 @@
+WITH z AS (SELECT y.a AS a FROM (SELECT x.a AS a FROM x AS x) AS y) SELECT z.a AS a FROM z AS z

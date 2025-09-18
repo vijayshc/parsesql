@@ -1,0 +1,1 @@
+SELECT x from (SELECT * from table_a)

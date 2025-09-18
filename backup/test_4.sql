@@ -1,0 +1,1 @@
+WITH y AS (SELECT * FROM x) SELECT a FROM y

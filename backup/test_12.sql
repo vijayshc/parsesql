@@ -1,0 +1,1 @@
+with _data as (select [struct(1 as a, 2 as b)] as col) select b from _data cross join unnest(col)

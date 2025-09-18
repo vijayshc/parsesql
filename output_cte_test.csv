@@ -1,0 +1,9 @@
+source_table,source_column,expression,target_column,target_table,file
+customers,customer_id,*,,,sql/test.sql
+customers,first_name,*,,,sql/test.sql
+customers,last_name,*,,,sql/test.sql
+customers,status,*,,,sql/test.sql
+customers,customer_id,*,,,sql/test_cte_complex.sql
+customers,first_name,*,,,sql/test_cte_complex.sql
+customers,last_name,*,,,sql/test_cte_complex.sql
+customers,status,*,,,sql/test_cte_complex.sql

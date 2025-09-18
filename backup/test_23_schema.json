@@ -1,0 +1,1 @@
+{"loan_ledger": {"product_type": "varchar", "month": "date", "loan_id": "int"}}
