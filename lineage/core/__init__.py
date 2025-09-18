@@ -1,1 +1,0 @@
-"""Core lineage extraction functionality."""
