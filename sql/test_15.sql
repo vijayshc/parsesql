@@ -1,0 +1,1 @@
+SELECT a, b, c FROM (select a, b, c from y) z

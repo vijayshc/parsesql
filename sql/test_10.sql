@@ -1,0 +1,1 @@
+SELECT (SELECT max(t3.my_column) my_column FROM foo t3) AS output FROM table3

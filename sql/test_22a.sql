@@ -1,0 +1,1 @@
+SELECT f.value:external_id::string AS external_id FROM database_name.schema_name.table_name AS raw, LATERAL FLATTEN(events) AS f

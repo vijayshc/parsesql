@@ -1,0 +1,15 @@
+{
+  "orders": ["customer_id", "total_amount", "order_date"],
+  "customers": ["customer_id", "first_name", "last_name", "status"],
+  "x": ["a"],
+  "y": ["a", "b", "c", "uid"],
+  "z": ["a", "uid"],
+  "table_a": ["x"],
+  "t1": ["x"],
+  "t2": ["x"],
+  "foo": ["my_column"],
+  "s.t": ["x", "y"],
+  "sample_data": ["a", "value", "category", "price"],
+  "quarterly_sales": ["empid", "amount", "quarter"],
+  "loan_ledger": ["product_type", "month", "loan_id"]
+}

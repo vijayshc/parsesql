@@ -1,0 +1,1 @@
+SELECT empid FROM quarterly_sales PIVOT(SUM(amount) FOR quarter IN ('2023_Q1', '2023_Q2', '2023_Q3')) ORDER BY empid

@@ -1,0 +1,1 @@
+WITH cte AS (SELECT * FROM (SELECT product_type, month, loan_id FROM loan_ledger) PIVOT (COUNT(loan_id) FOR month IN ('2024-10' as "2024-10"))) SELECT product_type, "2024-10" FROM cte

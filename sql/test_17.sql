@@ -1,0 +1,1 @@
+SELECT a as other_a FROM (select value,category from sample_data) PIVOT (sum(value) FOR category IN ('a', 'b'))

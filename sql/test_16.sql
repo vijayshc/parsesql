@@ -1,0 +1,1 @@
+SELECT * FROM (SELECT x /* c */ FROM t1) AS t2
