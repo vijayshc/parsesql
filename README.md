@@ -1,13 +1,28 @@
-# SQL Lineage Parser
+# SQL Lineage Parser (Modular Refactor)
 
-A Python tool for extracting column-level lineage from SQL queries using sqlglot. Supports multiple SQL engines and provides accurate lineage tracing for complex constructs like CTEs, subqueries, joins, unions, aggregates, and window functions.
+Modular, first‑principles implementation for column‑level SQL lineage built on top of `sqlglot`. The refactored architecture emphasizes clarity, testability, and extensibility while correctly handling real‑world SQL patterns (CTEs, nested subqueries, joins, star expansion, unions, etc.).
 
-## Features
+## Core Architecture Overview
 
-- **Multi-Engine Support**: Parses SQL for Spark, Hive, and other sqlglot-supported dialects
-- **Schema-Aware Resolution**: Resolves unqualified column references using table schemas
-- **Complex SQL Handling**: Supports CTEs, subqueries, joins, unions, aggregates, window functions
-- **CSV Output**: Generates detailed lineage reports in CSV format
+| Layer | Module | Responsibility |
+|-------|--------|----------------|
+| Parsing | `sqlglot` | Produces AST for each statement |
+| Schema Abstraction | `lineage.core.schema.Schema` | Normalized table → columns mapping, convenience lookups |
+| Source Modeling | `lineage.core.sources` | Represents tables, CTEs, subqueries as lazy-resolving sources |
+| Expression Analysis | `lineage.core.analyzer.SelectAnalyzer` | Walks projections & resolves column origins per expression |
+| Lineage Assembly | `lineage.extractor.LineageExtractor` | Orchestrates parse → analyze → emit `LineageRecord` rows |
+
+### Why This Design?
+1. **Deterministic Resolution Flow** – Each projection independently resolves its physical origins; no large stateful inference is required.
+2. **Lazy CTE Evaluation** – CTE/subquery outputs are only analyzed if referenced; avoids redundant traversals.
+3. **Clear Extension Points** – New resolution strategies (e.g., function provenance, data type propagation) plug into analyzer/origin modeling without rewriting core logic.
+4. **Predictable Star Semantics** – `*` and `alias.*` expansions enumerate only visible columns, respecting intermediate pruning.
+
+### Key Improvements vs Legacy Version
+- Removed deeply recursive bespoke resolution paths; replaced with uniform `SourceBase.resolve_column()` contract.
+- Unified star handling (unqualified & qualified) with consistent output column naming.
+- Added explicit origin objects (`ColumnOrigin`) making downstream enrichment (e.g., classification, sensitivity tags) straightforward.
+- Simplified schema flattening logic and isolated it from extractor internals.
 
 ## Installation
 
@@ -89,11 +104,8 @@ Precedence (highest first):
 ### Column Disambiguation
 If an unqualified column appears in multiple joined tables and schema says each table has that column, one lineage row per table is emitted (explicit ambiguity). If exactly one table matches, it's used. If none match, prefix heuristics then single-source inference are applied.
 
-### Star Expansion
-`SELECT *` expands using schema:
-* Single table / chained CTE: emits each column.
-* Joins: emits each column from every joined table (one row per source column).
-* Missing schema: falls back to a single `*` record.
+### Star Expansion (Refactored)
+`SELECT *` now yields one lineage row per physically resolvable column when schema/CTE projection info is available. If a source’s schema is unknown, it is skipped for enumeration (no misleading `*` column synthesis) unless nothing can be resolved – then a single placeholder record is emitted.
 
 ### Nested / Qualified Tables
 Nested JSON schemas (e.g., `{"a": {"b": {"t2": {"c2": "int"}}}}`) are flattened internally to `a.b.t2` so star expansions include `c2`.
@@ -138,20 +150,9 @@ orders,total_amount,total_amount,total_amount,
 - Window functions (ROW_NUMBER, RANK, etc.)
 - WHERE, GROUP BY, ORDER BY clauses
 
-## Deep CTE Lineage & Star Semantics
+## Deep CTE Lineage & Star Semantics (Summary)
 
-The extractor performs multi-level CTE analysis to ensure `SELECT *` only expands to the columns that are actually visible at the final query boundary:
-
-1. CTE Chain Unwinding: Chains like `lvl5 -> lvl4 -> lvl3 -> lvl2 -> lvl1 -> base` are walked top‑down. Expansion stops when an intermediate CTE introduces an explicit projection (column list, aliases, expressions) or a join/multi-source pattern.
-2. Projection Pruning Preservation: Columns dropped in any intermediate CTE are never reintroduced during later `*` expansion. Example: If `last_name` and `status` are removed at `lvl2`, a later `SELECT * FROM lvl5` will not emit them.
-3. Join Awareness: When a `SELECT *` sits atop a CTE whose body joins multiple sources, expansion emits (when schema is available) the union of projected columns from each underlying side, not the full base table schemas.
-4. Expression Aliases: For derived columns (e.g., `total_amount * 0.1 AS tax`), a downstream `SELECT *` over a CTE that already projected `tax` contributes only the physical source columns actually required (here: `orders.total_amount`). It does not duplicate the derived alias as a “source column”; instead it traces back to the physical origin(s).
-5. Duplicate Suppression with Mixed Projections: In patterns like `SELECT col_a, *, col_a FROM some_cte`, the `*` expansion will suppress `col_a` because it is already explicitly projected, avoiding redundant lineage rows.
-6. Ambiguity Handling: If a `*` spans multiple tables and schema metadata is present, the expansion enumerates concrete columns per table. Without schema, a conservative single `*` placeholder record is emitted.
-7. Undefined Reference Warning: If a final `FROM` references a name that is neither a known table (per schema) nor a defined CTE, a warning is logged to aid in catching typos early.
-8. Alias-qualified Stars (`a.*`): Stars scoped to a table/CTE alias inside a projection are expanded precisely to the visible columns of that alias' source (respecting intermediate projection pruning). In join contexts, `a.*` and `b.*` are each expanded independently; unqualified `*` over a join uses the join's projected columns (not entire base schemas) unless schema-driven multi-table expansion is required.
-9. Multi-table Join `*` Enumeration: When a CTE (or final SELECT) uses an unqualified `*` over a join, the extractor enumerates each participating side's visible columns. Pass-through CTEs are unwrapped so physical base tables appear instead of intermediate CTE names. If schema metadata is available, only columns defined in schema are emitted; otherwise a single `*` placeholder per unresolved table appears.
-10. UNION Star Chains: For a UNION/UNION ALL CTE where each branch projects identical columns (including via `*`), star expansion merges the branches, emitting the unified set of underlying source columns (deduplicated). Branch-specific discrepancies (different expressions) still trace back to their physical sources independently.
+The new engine walks only what it must: CTE bodies are lazily analyzed, star expansion respects pruning boundaries, joins enumerate visible columns, and unions merge per-branch projections without double counting.
 
 ### Practical Examples
 
@@ -172,12 +173,15 @@ This approach maximizes accuracy while preventing over-reporting columns that ar
 - Assumes accurate schema for best resolution
 - `impala` maps to `hive` dialect internally
 
+test_basic_lineage_on_test_sql()
 ## Tests
 
+Run all tests:
+
 ```bash
-python -c "
-from tests.test_lineage import test_basic_lineage_on_test_sql
-test_basic_lineage_on_test_sql()
-print('OK')
-"
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+PYTHONPATH=. pytest -q
 ```
+

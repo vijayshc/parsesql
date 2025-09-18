@@ -1,11 +1,6 @@
 WITH customers1 AS (
-	SELECT * FROM customers
-), customers2 AS (
-	SELECT *
-	FROM customers1 a
-	INNER JOIN orders b
-		ON a.customer_id = b.customer_id
-), customre3 AS (
-	SELECT * FROM customers2
+	SELECT a.*,b.order_id FROM customers a
+    inner join orders b on a.customer_id = b.customer_id
 )
-SELECT * FROM customre3;
+insert into orders
+SELECT * FROM customers1;

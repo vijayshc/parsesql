@@ -6,7 +6,7 @@ import os
 import sys
 from typing import List
 
-from lineage import LineageExtractor
+from lineage.extractor import LineageExtractor
 from lineage.logger import get_logger
 from lineage.models import CSV_HEADER, LineageRecord
 

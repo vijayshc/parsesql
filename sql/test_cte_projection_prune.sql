@@ -6,4 +6,5 @@ WITH base AS (
 ), lvl2 AS (
   SELECT * FROM lvl1
 )
+
 SELECT * FROM lvl2;

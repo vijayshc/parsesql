@@ -1,0 +1,1 @@
+SELECT ss_customer_sk, ROW_NUMBER() OVER (PARTITION BY ss_store_sk ORDER BY ss_ext_sales_price DESC) AS rn FROM store_sales

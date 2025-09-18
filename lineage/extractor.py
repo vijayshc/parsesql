@@ -2,1102 +2,475 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import sqlglot
 from sqlglot import expressions as exp
 
 from .logger import get_logger
 from .models import LineageRecord
-from .utils import (
-    alias_or_table_for_column,
-    alias_to_str,
-    collect_cte_aliases,
-    infer_target_table,
-    is_insert,
-    is_select,
-    is_with,
-    normalize_identifier,
-    table_name_of,
-    guess_table_from_prefix,
-)
+from .core.schema import Schema, _norm
+from .core.sources import AnalysisEnvironment, SelectSource, TableSource
+from .core.analyzer import SelectAnalyzer, expr_sql
+
+
+def _flatten_schema(raw: Dict) -> Dict[str, List[str]]:
+    """Flatten nested schema dicts into a table -> [columns] mapping.
+
+    Input may look like { db: { table: { col: type }}} or { table: [col1, col2] }.
+    We keep dotted naming for multi-level keys (db.table).
+    """
+    flat: Dict[str, List[str]] = {}
+
+    def walk(prefix: str, node):
+        if isinstance(node, list):
+            flat[_norm(prefix)] = [_norm(c) for c in node]
+        elif isinstance(node, dict):
+            # If dict values are primitives treat keys as column names
+            if node and all(not isinstance(v, (dict, list)) for v in node.values()):
+                flat[_norm(prefix)] = [_norm(k) for k in node.keys()]
+            else:
+                for k, v in node.items():
+                    key = f"{prefix}.{k}" if prefix else k
+                    walk(key, v)
+
+    for k, v in raw.items():
+        walk(k, v)
+    # remove empty keys
+    return {k: v for k, v in flat.items() if k}
 
 
 class LineageExtractor:
-    """
-    Extract lineage records from SQL files using sqlglot.
+    """New modular lineage extractor built from first principles.
 
-    Output fields per record:
-    - source_table
-    - source_column
-    - expression
-    - target_column
-    - target_table
+    Responsibilities:
+    1. Parse SQL statements using sqlglot
+    2. Build CTE environment (AnalysisEnvironment)
+    3. For each top-level statement, gather lineage rows via SelectAnalyzer
+       (INSERT targets supported by attaching target table/columns)
+    4. Emit LineageRecord rows
     """
 
-    def __init__(
-        self,
-        engine: str = "spark",
-        schema: Optional[Dict[str, List[str]]] = None,
-        logger: Optional[logging.Logger] = None,
-    ):
+    def __init__(self, engine: str = "spark", schema: Optional[Dict[str, List[str]]] = None, logger: Optional[logging.Logger] = None):
         self.engine = engine.lower()
-        # Normalize schema: flatten nested dicts like {a:{b:{t2:{c2:'int'}}}} -> {'a.b.t2': ['c2']}
-        self.schema = self._normalize_schema(schema or {})
+        self.schema = Schema(_flatten_schema(schema or {}))
         self.logger = logger or get_logger(level=os.getenv("LOG_LEVEL", "INFO"))
 
-    def _normalize_schema(self, schema: Dict) -> Dict[str, List[str]]:
-        flat: Dict[str, List[str]] = {}
-        def walk(prefix: str, node):
-            if isinstance(node, dict):
-                # If values are primitive types or all strings (columns), collect as columns
-                if node and all(isinstance(v, (str, int, float, bool)) for v in node.values()):
-                    cols = [normalize_identifier(k) for k in node.keys()]
-                    flat[prefix] = cols
-                else:
-                    for k, v in node.items():
-                        key = k.lower()
-                        new_prefix = f"{prefix}.{key}" if prefix else key
-                        walk(new_prefix, v)
-            elif isinstance(node, list):
-                flat[prefix] = [normalize_identifier(x) for x in node]
-        for k, v in schema.items():
-            walk(k.lower(), v)
-        return flat
+    # --------------- public API ---------------
+    def extract_from_file(self, path: str) -> List[LineageRecord]:
+        with open(path, 'r', encoding='utf-8') as f:
+            sql_text = f.read()
+        statements = self._parse(sql_text)
+        all_rows: List[LineageRecord] = []
+        for stmt in statements:
+            all_rows.extend(self._extract_statement(stmt, file=path))
+        return all_rows
 
-    def parse_sql(self, sql_text: str) -> List[exp.Expression]:
+    # --------------- internal ---------------
+    def _parse(self, sql_text: str) -> List[exp.Expression]:
         try:
             return sqlglot.parse(sql_text, read=self.engine)
-        except Exception as e:
-            self.logger.error(f"Failed to parse SQL for engine={self.engine}: {e}")
-            raise
-
-    def extract_from_file(self, path: str) -> List[LineageRecord]:
-        with open(path, "r", encoding="utf-8") as f:
-            sql_text = f.read()
-        stmts = self.parse_sql(sql_text)
-        all_records: List[LineageRecord] = []
-        for stmt in stmts:
-            all_records.extend(self._extract_from_statement(stmt, file=path))
-        return all_records
-
-    def _extract_from_statement(
-        self, stmt: exp.Expression, file: Optional[str] = None
-    ) -> List[LineageRecord]:
-        self.logger.debug(f"stmt type: {type(stmt)}, is_with: {is_with(stmt)}")
-        # Debug: log raw SQL for statement heads
-        try:
-            self.logger.debug(f"Statement SQL head: {stmt.sql(dialect=self.engine)[:200]}")
-        except Exception:
-            pass
-        # Normalize WITH wrapper
-        if is_with(stmt):
-            inner = stmt.this
-        else:
-            inner = stmt
-
-        target_table = infer_target_table(inner)
-        target_cols: List[str] = []
-
-        # Determine select part
-        select_expr: Optional[exp.Select] = None
-        if isinstance(inner, exp.Insert):
-            # INSERT ... SELECT ...
-            select_expr = inner.args.get("expression")
-            if isinstance(select_expr, exp.Select):
-                # capture target columns from insert if specified
-                cols = inner.args.get("columns") or []
-                if cols:
-                    target_cols = [normalize_identifier(c.name) for c in cols if c]
-                else:
-                    target_cols = []
-            elif isinstance(select_expr, exp.Union):
-                # handle union: no explicit target columns available
-                target_cols = []
-        elif isinstance(inner, exp.Select):
-            select_expr = inner
-        elif isinstance(inner, exp.Union):
-            # For UNION, process each side and merge
-            left = inner.left
-            right = inner.right
-            recs = []
-            recs.extend(self._extract_from_statement(left, file))
-            recs.extend(self._extract_from_statement(right, file))
-            return recs
-        else:
-            # Not a SELECT/INSERT we handle explicitly
+        except Exception as e:  # pragma: no cover
+            self.logger.error(f"Parse error: {e}")
             return []
 
-        if not select_expr:
-            return []
-
-        # Collect CTE context
-        with_expr = stmt if is_with(stmt) else None
-        cte_map: Dict[str, exp.Expression] = {}
-        if with_expr:
-            cte_map = collect_cte_aliases(with_expr)
-        elif isinstance(stmt, exp.Select) and getattr(stmt, 'ctes', None):
-            for cte in getattr(stmt, 'ctes'):
-                name = normalize_identifier(cte.alias)
-                cte_map[name] = cte.this
-        self.logger.debug(f"with_expr: {with_expr}, cte_map: {cte_map}")
-
-        # Build source mapping
-        return self._extract_from_select(
-            select_expr,
-            target_table=target_table,
-            target_cols=target_cols,
-            cte_map=cte_map,
-            file=file,
-        )
-
-    def _flatten_projection(self, select_expr: exp.Select, proj_map: Dict[str, exp.Expression]) -> List[Tuple[Optional[str], exp.Expression]]:
-        result: List[Tuple[Optional[str], exp.Expression]] = []
-        for proj in select_expr.expressions:
-            alias = None
-            expr = proj
-            if isinstance(proj, exp.Alias):
-                alias = normalize_identifier(proj.alias)
-                expr = proj.this
-            elif isinstance(proj, exp.Star):
-                # Expand * if possible; if not, keep a synthetic '*'
-                expanded = self._expand_star(select_expr)
-                if expanded:
-                    result.extend(expanded)
-                else:
-                    # Keep a placeholder to be resolved later
-                    star_col = exp.Column(this=exp.Identifier(this='*'))
-                    result.append((None, star_col))
-                continue
+    def _extract_statement(self, stmt: exp.Expression, file: Optional[str]) -> List[LineageRecord]:
+        # WITH wrapper (support WITH on any statement type including INSERT/UPDATE/MERGE)
+        env = AnalysisEnvironment(ctes={})
+        core_stmt = stmt
+        with_obj = None
+        if isinstance(stmt, exp.With):
+            with_obj = stmt
+        else:
+            w = stmt.args.get('with') if hasattr(stmt, 'args') else None
+            if w:
+                with_obj = w
+        if with_obj is not None:
+            for cte in with_obj.find_all(exp.CTE):
+                name = _norm(str(cte.alias))
+                if not name:
+                    continue
+                inner = cte.this
+                if isinstance(inner, (exp.Select, exp.Union)):
+                    env.register(name, SelectSource(inner, env, self.schema))
+            if isinstance(stmt, exp.With):
+                core_stmt = stmt.this
             else:
-                # derive alias from column name if simple column
-                if isinstance(proj, exp.Column):
-                    alias = normalize_identifier(proj.name)
+                core_stmt = stmt
 
-            # Resolve alias if expr is a column reference to an alias
-            if isinstance(expr, exp.Column) and not expr.table:
-                name = normalize_identifier(expr.name)
-                if name in proj_map:
-                    resolved_expr = proj_map.get(name)
-                    if resolved_expr:
-                        expr = resolved_expr
+        # INSERT target handling
+        target_table = None
+        target_cols: List[str] = []
+        select_part: Optional[exp.Expression] = None
+        if isinstance(core_stmt, exp.Insert):
+            # Target
+            table = core_stmt.this
+            if isinstance(table, exp.Schema):
+                t = table.this
+                if isinstance(t, exp.Table):
+                    target_table = self._table_name(t)
+                # capture target column identifiers
+                cols = table.expressions or []
+                target_cols = [_norm(getattr(c, 'name', getattr(c, 'this', None))) for c in cols if c]
+            elif isinstance(table, exp.Table):
+                target_table = self._table_name(table)
+            # Optional target columns
+            cols = core_stmt.args.get('columns') or []
+            for c in cols:
+                if hasattr(c, 'name'):
+                    target_cols.append(_norm(c.name))
+            select_part = core_stmt.args.get('expression')
+        else:
+            select_part = core_stmt
 
-            result.append((alias or None, expr))
-        return result
+        # UPDATE handling (no select_part path)
+        if isinstance(core_stmt, exp.Update):
+            return self._extract_update(core_stmt, env, file)
+        # MERGE handling
+        if isinstance(core_stmt, exp.Merge):
+            return self._extract_merge(core_stmt, env, file)
 
-    def _extract_from_select(
-        self,
-        select_expr: exp.Select,
-        target_table: Optional[str],
-        target_cols: List[str],
-        cte_map: Dict[str, exp.Expression],
-        file: Optional[str],
-    ) -> List[LineageRecord]:
-        self.logger.info(f"cte_map in _extract_from_select: {list(cte_map.keys())}")
-        recs: List[LineageRecord] = []
+        if not isinstance(select_part, (exp.Select, exp.Union)):
+            return []
 
-        # Build projection map for alias resolution
-        proj_map = self._projection_name_to_expr(select_expr)
-
-        # Determine potential target column names when not explicitly provided
-        proj = self._flatten_projection(select_expr, proj_map)
-        derived_targets: List[str] = []
-        for alias, expr in proj:
-            derived_targets.append(alias or self._expr_display(expr))
-
-        # Iterate projection expressions
-        # Pre-compute explicitly projected simple column names (excluding stars) to avoid star duplication
-        explicit_simple_cols: set[str] = set()
-        for p in select_expr.expressions:
-            if isinstance(p, exp.Column):
-                explicit_simple_cols.add(normalize_identifier(p.name))
-            elif isinstance(p, exp.Alias) and isinstance(p.this, exp.Column):
-                explicit_simple_cols.add(normalize_identifier(p.this.name))
-
-        for idx, (alias, expr) in enumerate(proj):
+        analyzer = SelectAnalyzer(select_part, env, self.schema, self.engine)
+        expr_lineages = analyzer.analyze()
+        # If INSERT without explicit target columns: apply positional or name-based mapping using target schema
+        if target_table and not target_cols:
+            target_schema_cols = list(self.schema.columns(target_table))
+            # Build output column list from analyzed expressions
+            produced = [el.output_column for el in expr_lineages]
+            # If star expansion produced None output_column entries (handled separately), infer from origins
+            inferred = []
+            for el in expr_lineages:
+                if el.output_column:
+                    inferred.append(el.output_column)
+                else:
+                    # Use first origin column when available
+                    if el.origins and el.origins[0].column:
+                        inferred.append(el.origins[0].column)
+            produced = [c for c in inferred if c]
+            # Retain only produced columns that exactly match target schema names and preserve produced order (positional safety)
+            ordered_schema_set = {c for c in target_schema_cols}
+            clean_produced = [c for c in produced if c in ordered_schema_set]
+            if clean_produced:
+                # Truncate to min of produced & schema intersection
+                target_cols = clean_produced[:len(clean_produced)]
+        rows: List[LineageRecord] = []
+        for idx, el in enumerate(expr_lineages):
+            # Determine target column if INSERT and user-specified target column list present
             target_col = None
             if target_cols and idx < len(target_cols):
-                target_col = target_cols[idx]
-            else:
-                target_col = alias or None
-
-            # Find source columns inside expression
-            source_cols = list(expr.find_all(exp.Column))
-            # Handle alias-qualified star: a.*
-            if isinstance(expr, exp.Column) and expr.name == '*' and expr.table:
-                alias_name = normalize_identifier(expr.table)
-                alias_map = self._build_alias_map(select_expr)
-                base_name = alias_map.get(alias_name)
-                # If alias refers to a CTE, enumerate its effective outputs
-                if base_name and base_name in cte_map:
-                    for st, sc in self._enumerate_cte_output_sources(base_name, cte_map, set()):
-                        if sc in explicit_simple_cols:
-                            continue
-                        recs.append(LineageRecord(
-                            source_table=st,
-                            source_column=sc,
-                            expression=f"{alias_name}.*",
-                            target_column=None,
-                            target_table=target_table,
-                            file=file,
-                            engine=self.engine,
-                        ))
-                    continue
-                # Alias maps directly to a base table
-                if base_name:
-                    cols = self.schema.get(base_name, [])
-                    if cols:
-                        for c in cols:
-                            if normalize_identifier(c) in explicit_simple_cols:
-                                continue
-                            recs.append(LineageRecord(
-                                source_table=base_name,
-                                source_column=normalize_identifier(c),
-                                expression=f"{alias_name}.*",
-                                target_column=None,
-                                target_table=target_table,
-                                file=file,
-                                engine=self.engine,
-                            ))
-                        continue
-                    else:
-                        # Fallback unresolved star
-                        recs.append(LineageRecord(
-                            source_table=base_name,
-                            source_column='*',
-                            expression=f"{alias_name}.*",
-                            target_column=None,
-                            target_table=target_table,
-                            file=file,
-                            engine=self.engine,
-                        ))
-                        continue
-                # Alias not found (could be CTE alias itself)
-                if alias_name in cte_map:
-                    for st, sc in self._enumerate_cte_output_sources(alias_name, cte_map, set()):
-                        if sc in explicit_simple_cols:
-                            continue
-                        recs.append(LineageRecord(
-                            source_table=st,
-                            source_column=sc,
-                            expression=f"{alias_name}.*",
-                            target_column=None,
-                            target_table=target_table,
-                            file=file,
-                            engine=self.engine,
-                        ))
-                    continue
-                # As last resort, emit unresolved alias star
-                recs.append(LineageRecord(
-                    source_table=alias_name,
-                    source_column='*',
-                    expression=f"{alias_name}.*",
-                    target_column=None,
-                    target_table=target_table,
-                    file=file,
-                    engine=self.engine,
-                ))
-                continue
-            # Handle SELECT * (unqualified) specially: no Column nodes inside Star, so produce mappings
-            if isinstance(expr, exp.Column) and isinstance(expr.this, exp.Identifier) and expr.this.this == '*' and not expr.table:
-                # Improved STAR expansion: respect intermediate CTE projections (do NOT blindly expand to base schema)
-                from_ = select_expr.args.get("from")
-                if not from_:
-                    continue
-                # Detect undefined references
-                for t in from_.find_all(exp.Table):
-                    tname = table_name_of(t)
-                    if tname and tname not in self.schema and tname not in cte_map:
-                        try:
-                            self.logger.warning(f"Potential undefined table/CTE reference: {tname}")
-                        except Exception:
-                            pass
-                # Gather all tables (FROM + JOINs)
-                multi_tables: List[str] = []
-                for t in from_.find_all(exp.Table):
-                    tn = table_name_of(t)
-                    if tn:
-                        multi_tables.append(tn)
-                for j in (select_expr.args.get("joins") or []):
-                    jt = j.this
-                    if isinstance(jt, exp.Table):
-                        tn = table_name_of(jt)
-                        if tn:
-                            multi_tables.append(tn)
-                # If more than one base table and no single CTE indirection, use schema-based expansion per table
-                if len(set(multi_tables)) > 1:
-                    emitted = False
-                    for bt in multi_tables:
-                        cols = self.schema.get(bt, [])
-                        if cols:
-                            for c in cols:
-                                if normalize_identifier(c) in explicit_simple_cols:
-                                    continue
-                                recs.append(LineageRecord(
-                                    source_table=bt,
-                                    source_column=normalize_identifier(c),
-                                    expression='*',
-                                    target_column=None,
-                                    target_table=target_table,
-                                    file=file,
-                                    engine=self.engine,
-                                ))
-                                emitted = True
-                    if emitted:
-                        continue
-                # Single source table or CTE
-                tables = [t for t in from_.find_all(exp.Table)]
-                if len(tables) != 1:
-                    # Fall back – unresolved star
-                    recs.append(LineageRecord(
-                        source_table=None,
-                        source_column='*',
-                        expression='*',
-                        target_column=None,
-                        target_table=target_table,
-                        file=file,
-                        engine=self.engine,
-                    ))
-                    continue
-                single_name = table_name_of(tables[0])
-                if not single_name:
-                    continue
-                # If it's a CTE, enumerate its effective output columns honoring projection pruning/aliasing
-                if single_name in cte_map:
-                    for st, sc in self._enumerate_cte_output_sources(single_name, cte_map, set()):
-                        if sc in explicit_simple_cols:
-                            continue
-                        recs.append(LineageRecord(
-                            source_table=st,
-                            source_column=sc,
-                            expression='*',
-                            target_column=None,
-                            target_table=target_table,
-                            file=file,
-                            engine=self.engine,
-                        ))
-                    continue
-                # Base table: expand via schema if available
-                cols = self.schema.get(single_name, [])
-                if cols:
-                    for c in cols:
-                        if normalize_identifier(c) in explicit_simple_cols:
-                            continue
-                        recs.append(LineageRecord(
-                            source_table=single_name,
-                            source_column=normalize_identifier(c),
-                            expression='*',
-                            target_column=None,
-                            target_table=target_table,
-                            file=file,
-                            engine=self.engine,
-                        ))
-                else:
-                    recs.append(LineageRecord(
-                        source_table=single_name,
-                        source_column='*',
-                        expression='*',
-                        target_column=None,
-                        target_table=target_table,
-                        file=file,
-                        engine=self.engine,
-                    ))
-                continue
-            if not source_cols:
-                # Expression without column reference (e.g., literal)
-                recs.append(
+                # Only map if expression's primary origin column name matches the target column OR names identical
+                candidate = target_cols[idx]
+                origin_first = el.origins[0].column if el.origins else None
+                if origin_first == candidate or el.output_column == candidate:
+                    target_col = candidate
+            elif el.output_column:
+                target_col = el.output_column
+            for origin in el.origins:
+                # Prefer real physical column name if alias-only (e.g., CTE projected 'a' from 'customer_id')
+                source_column = origin.column
+                # Fallback: if this is an INSERT context and target_col not set but el.output_column matches one of target_cols
+                if target_table and not target_col and el.output_column in target_cols:
+                    target_col = el.output_column
+                rows.append(
                     LineageRecord(
-                        source_table=None,
-                        source_column=None,
-                        expression=self._expr_display(expr),
+                        source_table=origin.table,
+                        source_column=source_column,
+                        expression=el.expression_sql,
                         target_column=target_col,
                         target_table=target_table,
                         file=file,
                         engine=self.engine,
                     )
                 )
+        # Deduplicate identical full lineage rows (source_table, source_column, target_table, target_column, expression)
+        seen_target = set()
+        deduped: List[LineageRecord] = []
+        for r in rows:
+            key = (r.source_table, r.source_column, r.target_table, r.target_column, r.expression)
+            if key in seen_target:
                 continue
+            seen_target.add(key)
+            deduped.append(r)
+        # Remove placeholder None origins when concrete origin for same target/expression exists
+        grouped = {}
+        for r in deduped:
+            gkey = (r.target_table, r.target_column, r.expression)
+            grouped.setdefault(gkey, []).append(r)
+        filtered: List[LineageRecord] = []
+        for gkey, items in grouped.items():
+            concrete = [i for i in items if i.source_table or i.source_column]
+            if concrete:
+                # remove placeholders (None,None)
+                filtered.extend([c for c in concrete if c.source_table or c.source_column])
+            else:
+                # Keep constants only if there is no other row for that target/expression (already known here); acceptable
+                # But if expression is a NULL/constant and target name already appears elsewhere (handled after grouping) it will be filtered.
+                filtered.extend(items)
+        # Final pass: if multiple rows share target_column and any have concrete origin, drop constant-only rows
+        by_target = {}
+        for r in filtered:
+            by_target.setdefault(r.target_column, []).append(r)
+        final_filtered: List[LineageRecord] = []
+        for tcol, items in by_target.items():
+            concretes = [i for i in items if i.source_table or i.source_column]
+            if concretes:
+                final_filtered.extend(concretes)
+            else:
+                final_filtered.extend(items)
+        # Secondary collapse: for duplicate target_column mapping to same source_table/source_column keep first
+        final: List[LineageRecord] = []
+        collapse_seen = set()
+        for r in final_filtered:
+            if r.target_column:
+                ckey = (r.source_table, r.source_column, r.target_table, r.target_column)
+                if ckey in collapse_seen:
+                    continue
+                collapse_seen.add(ckey)
+            final.append(r)
+        return final
 
-            for col in source_cols:
-                for tbl, scol in self._resolve_column_sources(select_expr, col, cte_map, proj_map):
-                    recs.append(
-                        LineageRecord(
-                            source_table=tbl,
-                            source_column=scol,
-                            expression=self._expr_display(expr),
-                            target_column=target_col,
-                            target_table=target_table,
-                            file=file,
-                            engine=self.engine,
-                        )
-                    )
+    # unreachable due to return above
 
-        return recs
-
-    def _resolve_table_name(
-        self,
-        scope: exp.Select,
-        alias: Optional[str],
-        cte_map: Dict[str, exp.Expression],
-    ) -> Optional[str]:
-        alias_map = self._build_alias_map(scope)
-        if alias and alias in alias_map:
-            return alias_map[alias]
-        if not alias:
-            # Try to infer from single-source select
-            from_ = scope.args.get("from")
-            if from_:
-                tables = [t for t in from_.find_all(exp.Table)]
-                if len(tables) == 1:
-                    return table_name_of(tables[0])
-            return None
-
-        # If alias is a CTE name
-        if alias in cte_map:
-            inner = cte_map[alias]
-            # If CTE is a select from table(s), and only one base table, return it
-            from_ = inner.args.get("from") if isinstance(inner, exp.Select) else None
-            if from_:
-                base_tables = [table_name_of(t) for t in from_.find_all(exp.Table)]
-                base_tables = [t for t in base_tables if t]
-                if len(base_tables) == 1:
-                    return base_tables[0]
-            return alias
-
-        # Fallback: return alias as unknown table name
-        return alias
-
-    def _expr_display(self, expr: exp.Expression) -> str:
-        try:
-            return expr.sql(dialect=self.engine)
-        except Exception:
-            return str(expr)
-
-    def _build_alias_map(self, scope: exp.Select) -> Dict[str, str]:
-        """
-        Build a mapping of alias -> base table name for the current select scope.
-        Also include short base table names to full names to help disambiguate.
-        """
-        from .utils import alias_to_str
-        result: Dict[str, str] = {}
-        # Traverse all tables in the SELECT scope (FROM + JOINs)
-        for t in scope.find_all(exp.Table):
-            base = table_name_of(t)
-            if not base:
-                continue
-            # map alias -> base
-            a = normalize_identifier(alias_to_str(getattr(t, "alias", None)))
-            try:
-                self.logger.debug(
-                    f"Table node: base={base}, raw={t.sql(dialect=self.engine)}, alias_obj={getattr(t,'alias',None)}, alias={a}"
-                )
-            except Exception:
-                pass
-            if a:
-                result[a] = base
-            # map short base name -> base
-            short = base.split(".")[-1]
-            result.setdefault(short, base)
-        try:
-            self.logger.debug(f"Alias map: {result}")
-        except Exception:
-            pass
-        return result
-
-    def _get_subquery_by_alias(self, scope: exp.Select, alias: str) -> Optional[exp.Expression]:
-        for sub in scope.find_all(exp.Subquery):
-            # Check if sub has alias
-            a = normalize_identifier(alias_to_str(getattr(sub, "alias", None)))
-            try:
-                self.logger.debug(
-                    f"Inspecting subquery alias: sub_sql={sub.sql(dialect=self.engine)}, sub.alias={getattr(sub, 'alias', None)}, norm_alias={a}, target_alias={alias}"
-                )
-            except Exception:
-                pass
-            if a == alias:
-                return sub.this
-            # Check if parent From has alias
-            parent = sub.parent
-            if isinstance(parent, exp.From) and parent.alias:
-                a = normalize_identifier(alias_to_str(parent.alias))
-                try:
-                    self.logger.debug(
-                        f"Inspecting parent FROM alias: parent.alias={parent.alias}, norm_alias={a}, target_alias={alias}"
-                    )
-                except Exception:
-                    pass
-                if a == alias:
-                    return sub.this
-        return None
-
-    def _alias_or_table_for_column(self, scope: exp.Select, column: exp.Column) -> Optional[str]:
-        tbl = column.table
-        if tbl:
-            return normalize_identifier(tbl)
-        name = normalize_identifier(column.name)
-        # Check alias map
-        alias_map = self._build_alias_map(scope)
-        for alias, base in alias_map.items():
-            if alias == name or base.split(".")[-1] == name:
-                return alias
-        # Check subqueries for projection alias match
-        for sub in scope.find_all(exp.Subquery):
-            a = normalize_identifier(alias_to_str(getattr(sub, "alias", None)))
-            if a:
-                query = sub.this
-                parts = self._get_select_parts(query)
-                for part in parts:
-                    if name in self._projection_name_to_expr(part):
-                        return a
-        # Additional deep search: unqualified column referencing alias defined only inside a nested subquery
-        for sub in scope.find_all(exp.Subquery):
-            a = normalize_identifier(alias_to_str(getattr(sub, "alias", None)))
-            if not a:
-                continue
-            inner_selects = self._get_select_parts(sub.this)
-            for inner in inner_selects:
-                for proj in inner.expressions:
-                    if isinstance(proj, exp.Alias):
-                        alias_name = normalize_identifier(proj.alias)
-                        if alias_name == name:
-                            return a
-        return None
-
-    def _get_select_parts(self, query: exp.Expression) -> List[exp.Select]:
-        """Recursively get all SELECT parts from a query, handling UNIONs."""
-        parts = []
-        if isinstance(query, exp.Union):
-            parts.extend(self._get_select_parts(query.left))
-            parts.extend(self._get_select_parts(query.right))
-        elif isinstance(query, exp.Select):
-            parts.append(query)
-        return parts
-
-    def _expand_star(self, scope: exp.Select) -> List[Tuple[str, exp.Expression]]:
-        """Expand * into columns when selecting from subqueries/CTEs with known outputs."""
-        out: List[Tuple[str, exp.Expression]] = []
-        from_ = scope.args.get("from")
-        if not from_:
+    # --------------- non-select lineage helpers ---------------
+    def _analyze_expression_origins(self, expression: exp.Expression, sources: List[TableSource | SelectSource]) -> List[LineageRecord]:
+        from .core.analyzer import SelectAnalyzer
+        # Reuse analyzer by creating a synthetic SELECT expression list
+        fake_select = exp.select(expression)
+        # Build temporary environment for sources already passed (no CTE resolution here)
+        env = AnalysisEnvironment(ctes={})
+        analyzer = SelectAnalyzer(fake_select, env, self.schema, self.engine)
+        # Monkey patch _build_sources to supply provided sources
+        def _custom_build(_self, _select):
+            out = []
+            for s in sources:
+                if isinstance(s, TableSource):
+                    out.append((s.table_name.split('.')[-1], s))
+                else:
+                    out.append(('_sub', s))
             return out
-        # For each subquery source, flatten its outputs
-        for sub in from_.find_all(exp.Subquery):
-            a = normalize_identifier(alias_to_str(getattr(sub, "alias", None))) or ""
-            inner = sub.this if isinstance(sub.this, exp.Select) else None
-            if not inner:
-                continue
-            inner_proj = self._flatten_projection(inner, self._projection_name_to_expr(inner))
-            for alias, _ in inner_proj:
-                col_name = alias or ""
-                if not col_name:
-                    continue
-                col_expr = exp.Column(this=exp.Identifier(this=col_name))
-                if a:
-                    col_expr.set("table", exp.Identifier(this=a))
-                out.append((col_name, col_expr))
-        return out
+        analyzer._build_sources = _custom_build.__get__(analyzer, SelectAnalyzer)  # type: ignore
+        expr_lineages = analyzer.analyze()
+        rows: List[LineageRecord] = []
+        for el in expr_lineages:
+            for origin in el.origins:
+                if origin.table or origin.column:
+                    rows.append(LineageRecord(
+                        source_table=origin.table,
+                        source_column=origin.column,
+                        expression=el.expression_sql,
+                        target_column=None,
+                        target_table=None,
+                        file=None,
+                        engine=self.engine,
+                    ))
+        return rows
 
-    def _resolve_column_sources(
-        self,
-        scope: exp.Select,
-        column: exp.Column,
-        cte_map: Dict[str, exp.Expression],
-        proj_map: Dict[str, exp.Expression],
-        _visited: Optional[set] = None,
-    ) -> List[Tuple[Optional[str], Optional[str]]]:
-        """
-        Resolve a column to ultimate source tables/columns, traversing CTEs and subqueries.
-        Returns list of (source_table, source_column) pairs.
-        """
-        results: List[Tuple[Optional[str], Optional[str]]] = []
-        _visited = _visited or set()
-
-        tbl = normalize_identifier(column.table) if column.table else None
-        name = normalize_identifier(column.name)
-
-        key = (id(scope), name)
-        _visited.add(key)
-
-        # Resolve alias if column is an alias in current scope
-        if not tbl and name in proj_map:
-            resolved_expr = proj_map.get(name)
-            if resolved_expr:
-                inner_cols = list(resolved_expr.find_all(exp.Column))
-                if inner_cols:
-                    results = []
-                    for c in inner_cols:
-                        results.extend(self._resolve_column_sources(scope, c, cte_map, proj_map, _visited))
-                    return results
-
-        # Determine alias via inference if missing
-        alias = tbl or self._alias_or_table_for_column(scope, column)
-        if not alias:
-            # If there's exactly one source table in this scope, and it corresponds to a CTE or a subquery,
-            # resolve through it instead of treating it as a base table name.
-            one_alias = self._single_source_alias(scope)
-            if one_alias:
-                alias = one_alias
+    def _extract_update(self, update: exp.Update, env: AnalysisEnvironment, file: Optional[str]) -> List[LineageRecord]:
+        target_table = None
+        if isinstance(update.this, exp.Table):
+            target_table = self._table_name(update.this)
+        # sources: target plus any tables referenced in FROM / USING style joins (simplified)
+        sources: List[TableSource | SelectSource] = []
+        if target_table:
+            sources.append(TableSource(target_table, self.schema))
+        from_clause = update.args.get('from')
+        if from_clause and hasattr(from_clause, 'this'):
+            fc_this = from_clause.this
+            if isinstance(fc_this, exp.Table):
+                sources.append(TableSource(self._table_name(fc_this), self.schema))
+            elif isinstance(fc_this, exp.Subquery) and isinstance(fc_this.this, exp.Select):
+                # treat subquery as select source
+                sources.append(SelectSource(fc_this.this, env, self.schema))
+        rows: List[LineageRecord] = []
+        assignments = update.args.get('expressions') or []
+        for assign in assignments:
+            # Assignment nodes often are EQ with left Column and right expression
+            if isinstance(assign, exp.EQ):
+                left = assign.left
+                right = assign.right
             else:
-                # Check if single table is a CTE
-                from_ = scope.args.get("from")
-                if from_:
-                    tables = [t for t in from_.find_all(exp.Table)]
-                    if len(tables) == 1 and not (scope.args.get("joins") or []):
-                        tname = table_name_of(tables[0])
-                        if tname and tname in cte_map:
-                            alias = tname
-
-        # CTE resolution
-        self.logger.debug(f"Checking CTE for {name}, alias {alias}, in cte_map {alias in cte_map if alias else False}")
-        if alias and alias in cte_map:
-            self.logger.debug(f"CTE branch for {name}, alias {alias}")
-            inner = cte_map[alias]
-            inner_ctes = collect_cte_aliases(inner) if isinstance(inner, exp.With) else {}
-            inner_select = inner.this if isinstance(inner, exp.With) else inner
-            # Support UNION by exploring both sides
-            parts = self._get_select_parts(inner_select)
-            for part in parts:
-                if not isinstance(part, exp.Select):
-                    continue
-                proj_map = self._projection_name_to_expr(part)
-                expr = proj_map.get(name)
-                if expr is None:
-                    # Check if name is a direct column in the projection
-                    for proj in part.expressions:
-                        if isinstance(proj, exp.Column) and normalize_identifier(proj.name) == name:
-                            expr = proj
+                left = getattr(assign, 'this', None)
+                right = getattr(assign, 'expression', None)
+            if not isinstance(left, exp.Column) or right is None:
+                continue
+            target_col = _norm(left.name)
+            # Extract origins of right expression
+            origins = []
+            for col in right.find_all(exp.Column):
+                name = _norm(col.name)
+                tbl_alias = _norm(col.table) if col.table else None
+                phys_table = None
+                if tbl_alias:
+                    # Attempt to resolve alias to target_table (simple heuristic: if alias isn't a registered table name but target table exists)
+                    if target_table and tbl_alias != target_table.split('.')[-1]:
+                        # If any source table matches alias, use its physical name
+                        for s in sources:
+                            if isinstance(s, TableSource) and (s.table_name.split('.')[-1] == tbl_alias or s.table_name == tbl_alias):
+                                phys_table = s.table_name
+                                break
+                    if not phys_table:
+                        for s in sources:
+                            if isinstance(s, TableSource) and (s.table_name.split('.')[-1] == tbl_alias or s.table_name == tbl_alias):
+                                phys_table = s.table_name
+                                break
+                if not phys_table:
+                    # unqualified or unresolved alias: search in sources for column membership
+                    for s in sources:
+                        if isinstance(s, TableSource) and name in self.schema.columns(s.table_name):
+                            phys_table = s.table_name
                             break
-                if expr is None:
-                    # If projection includes STAR, attribute to single inner base table when unambiguous
-                    has_star = any(isinstance(p, exp.Star) or (isinstance(p, exp.Column) and p.name == '*') for p in part.expressions)
-                    if has_star:
-                        from_ = part.args.get("from")
-                        joins = part.args.get("joins") or []
-                        if from_ and not joins:
-                            base_tables = [table_name_of(t) for t in from_.find_all(exp.Table)]
-                            base_tables = [t for t in base_tables if t]
-                            if len(base_tables) == 1:
-                                return [(base_tables[0], name)]
-                    continue
-                inner_cols = list(expr.find_all(exp.Column))
-                self.logger.debug(f"CTE expr for {name}: {expr}, inner_cols: {inner_cols}")
-                if not inner_cols:
-                    # Try to guess from inner base tables when expression is literal
-                    candidates = []
-                    from_ = part.args.get("from")
-                    if from_:
-                        for t in from_.find_all(exp.Table):
-                            tname = table_name_of(t)
-                            if tname:
-                                candidates.append(tname)
-                    guessed = guess_table_from_prefix(name, candidates)
-                    if guessed:
-                        results.append((guessed, name))
-                    else:
-                        results.append((None, None))
-                else:
-                    for c in inner_cols:
-                        results.extend(
-                            self._resolve_column_sources(part, c, {**cte_map, **inner_ctes}, proj_map, _visited)
-                        )
-            if (not results or all(a is None for a, _ in results)) and isinstance(inner_select, exp.Select):
-                # Guess from inner base tables when projection wasn't found
-                candidates = []
-                from_ = inner_select.args.get("from")
-                if from_:
-                    for t in from_.find_all(exp.Table):
-                        tname = table_name_of(t)
-                        if tname:
-                            candidates.append(tname)
-                guessed = guess_table_from_prefix(name, candidates)
-                if guessed:
-                    return [(guessed, name)]
-            self.logger.debug(f"CTE results for {name}: {results}")
-            return [(a, b) for a, b in results if a is not None] or [(None, name)]
+                if not phys_table and target_table and name in self.schema.columns(target_table):
+                    phys_table = target_table
+                origins.append((phys_table, name))
+            if not origins:
+                origins.append((None, None))
+            for tbl, col in origins:
+                rows.append(LineageRecord(
+                    source_table=tbl,
+                    source_column=col,
+                    expression=expr_sql(right, self.engine),
+                    target_column=target_col,
+                    target_table=target_table,
+                    file=file,
+                    engine=self.engine,
+                ))
+        return rows
 
-        # Subquery resolution within current scope
-        if alias:
-            sub = self._get_subquery_by_alias(scope, alias)
-            if sub:
-                # Prevent infinite recursion: we'll track visited per select part below
-                # Unwrap WITH if present to collect inner CTEs
-                inner_ctes: Dict[str, exp.Expression] = collect_cte_aliases(sub)
-                inner_select = sub.this if isinstance(sub, exp.With) else sub
-                # Handle UNION
-                parts = self._get_select_parts(inner_select)
-                for part in parts:
-                    if not isinstance(part, exp.Select):
-                        continue
-                    proj_map = self._projection_name_to_expr(part)
-                    try:
-                        self.logger.debug(
-                            f"Subquery resolution: alias={alias}, name={name}, part_sql={part.sql(dialect=self.engine)}, proj_map_keys={list(proj_map.keys())}"
-                        )
-                    except Exception:
-                        pass
-                    part_key = (id(part), name)
-                    if part_key not in _visited:
-                        _visited.add(part_key)
-                        expr = proj_map.get(name)
-                        if expr is None:
-                            try:
-                                self.logger.debug(
-                                    f"Subquery resolution: expr for name={name} not found in proj_map"
-                                )
-                            except Exception:
-                                pass
-                            # Fallback 1: find alias node whose alias name matches
-                            for proj in part.expressions:
-                                if isinstance(proj, exp.Alias):
-                                    alias_name = normalize_identifier(proj.alias)
-                                    if alias_name == name:
-                                        expr = proj.this
-                                        break
-                            # Fallback 2: if only one projection column, use it
-                            if expr is None and len(part.expressions) == 1:
-                                only_proj = part.expressions[0]
-                                if isinstance(only_proj, exp.Alias):
-                                    expr = only_proj.this
-                                elif isinstance(only_proj, exp.Column):
-                                    expr = only_proj
-                        if expr is not None:
-                            inner_cols = list(expr.find_all(exp.Column))
-                            try:
-                                self.logger.debug(
-                                    f"Subquery resolution: expr={self._expr_display(expr)}, inner_cols={inner_cols}"
-                                )
-                            except Exception:
-                                pass
-                            if not inner_cols:
-                                # Try to guess from subquery's base tables
-                                candidates = []
-                                from_ = part.args.get("from")
-                                if from_:
-                                    for t in from_.find_all(exp.Table):
-                                        tname = table_name_of(t)
-                                        if tname:
-                                            candidates.append(tname)
-                                guessed = guess_table_from_prefix(name, candidates)
-                                if guessed:
-                                    return [(guessed, name)]
-                                return [(None, None)]
-                            for c in inner_cols:
-                                results.extend(self._resolve_column_sources(part, c, {**cte_map, **inner_ctes}, proj_map, _visited))
-                            return [(a, b) for a, b in results if a is not None] or [(None, name)]        # Base table
-        if alias:
-            src_table = self._resolve_table_name(scope, alias, cte_map)
-            self.logger.debug(f"Resolving {name} with explicit/derived alias {alias} -> {src_table}")
-            # Subquery alias unwrap
-            sub = self._get_subquery_by_alias(scope, alias)
-            if sub and isinstance(sub, exp.Select):
-                from_ = sub.args.get("from")
-                joins = sub.args.get("joins") or []
-                if from_ and not joins:
-                    inner_tables = [table_name_of(t) for t in from_.find_all(exp.Table)]
-                    inner_tables = [t for t in inner_tables if t]
-                    if len(inner_tables) == 1 and inner_tables[0] in self.schema:
-                        src_table = inner_tables[0]
-            return [(src_table, name)]
+    def _extract_merge(self, merge: exp.Merge, env: AnalysisEnvironment, file: Optional[str]) -> List[LineageRecord]:
+        rows: List[LineageRecord] = []
+        target_table = None
+        if merge.this and isinstance(merge.this, exp.Table):
+            target_table = self._table_name(merge.this)
+        source_table = None
+        using = merge.args.get('using')
+        if using and isinstance(using.this, exp.Table):
+            source_table = self._table_name(using.this)
+        using_subquery_select = None
+        if using and isinstance(using.this, exp.Subquery) and isinstance(using.this.this, exp.Select):
+            using_subquery_select = using.this.this
+        # Process merge clauses
+        whens = merge.args.get('whens')
+        if whens:
+            for clause in whens.expressions if hasattr(whens, 'expressions') else []:
+                if isinstance(clause, exp.When):
+                    then_expr = clause.args.get('then')
+                    # UPDATE clause lineage (direct handling to resolve alias src)
+                    if isinstance(then_expr, exp.Update) and target_table:
+                        assignments = then_expr.args.get('expressions') or []
+                        for assign in assignments:
+                            if isinstance(assign, exp.EQ):
+                                left = assign.left
+                                right = assign.right
+                            else:
+                                left = getattr(assign, 'this', None)
+                                right = getattr(assign, 'expression', None)
+                            if not isinstance(left, exp.Column) or right is None:
+                                continue
+                            tgt_col = _norm(left.name)
+                            # collect column origins in right expression
+                            origin_cols = []
+                            for col in right.find_all(exp.Column):
+                                col_name = _norm(col.name)
+                                alias = _norm(col.table) if col.table else None
+                                using_alias_name = None
+                                if using and getattr(using, 'alias', None):
+                                    ua = getattr(using, 'alias')
+                                    using_alias_name = _norm(getattr(ua, 'this', getattr(ua, 'name', None)))
+                                if alias and using and isinstance(using.this, exp.Subquery) and using_alias_name and alias == using_alias_name:
+                                    origin_cols.append((source_table, col_name))
+                                elif alias and source_table and alias in (source_table.split('.')[-1], source_table):
+                                    origin_cols.append((source_table, col_name))
+                                elif source_table and col_name in self.schema.columns(source_table):
+                                    origin_cols.append((source_table, col_name))
+                                else:
+                                    origin_cols.append((None, col_name))
+                            if not origin_cols:
+                                origin_cols.append((None, None))
+                            for ot, oc in origin_cols:
+                                resolved_table = ot
+                                if resolved_table is None and target_table and oc and oc in self.schema.columns(target_table):
+                                    resolved_table = target_table
+                                rows.append(LineageRecord(
+                                    source_table=resolved_table,
+                                    source_column=oc,
+                                    expression=expr_sql(right, self.engine),
+                                    target_column=tgt_col,
+                                    target_table=target_table,
+                                    file=file,
+                                    engine=self.engine,
+                                ))
+                    # INSERT clause lineage (VALUES columns) mapping index-wise
+                    elif isinstance(then_expr, exp.Insert) and target_table:
+                        insert = then_expr
+                        # columns in INSERT statement (this tuple) correspond to target order
+                        target_cols = []
+                        if isinstance(insert.this, exp.Tuple):
+                            for c in insert.this.expressions:
+                                if isinstance(c, exp.Column):
+                                    target_cols.append(_norm(c.name))
+                        value_exprs = []
+                        expr_tuple = insert.args.get('expression')
+                        if isinstance(expr_tuple, exp.Tuple):
+                            value_exprs = expr_tuple.expressions
+                        for idx, ve in enumerate(value_exprs):
+                            tgt_col = target_cols[idx] if idx < len(target_cols) else None
+                            if not tgt_col:
+                                continue
+                            origins = []
+                            for col in ve.find_all(exp.Column):
+                                col_name = _norm(col.name)
+                                alias = _norm(col.table) if col.table else None
+                                if alias and source_table and alias in (source_table.split('.')[-1], source_table):
+                                    origins.append((source_table, col_name))
+                                elif source_table and col_name in self.schema.columns(source_table):
+                                    origins.append((source_table, col_name))
+                                else:
+                                    origins.append((None, col_name))
+                            if not origins:
+                                origins.append((None, None))
+                            for ot, oc in origins:
+                                resolved_table = ot
+                                if resolved_table is None and target_table and oc and oc in self.schema.columns(target_table):
+                                    resolved_table = target_table
+                                rows.append(LineageRecord(
+                                    source_table=resolved_table,
+                                    source_column=oc,
+                                    expression=expr_sql(ve, self.engine),
+                                    target_column=tgt_col,
+                                    target_table=target_table,
+                                    file=file,
+                                    engine=self.engine,
+                                ))
+        # For insert mapping ensure target_table set
+        # Rebuild rows with target_table set (immutable dataclass)
+        updated: List[LineageRecord] = []
+        for r in rows:
+            updated.append(LineageRecord(
+                source_table=r.source_table,
+                source_column=r.source_column,
+                expression=r.expression,
+                target_column=r.target_column,
+                target_table=r.target_table or target_table,
+                file=file,
+                engine=self.engine,
+            ))
+        rows = updated
+        return rows
 
-        # Unqualified column disambiguation using schema
-        candidate_tables: List[str] = []
-        from_ = scope.args.get("from")
-        if from_:
-            for t in from_.find_all(exp.Table):
-                tname = table_name_of(t)
-                if tname:
-                    candidate_tables.append(tname)
-        joins = scope.args.get("joins") or []
-        for join in joins:
-            jt = join.this
-            if isinstance(jt, exp.Table):
-                tname = table_name_of(jt)
-                if tname:
-                    candidate_tables.append(tname)
+    # --------------- helpers ---------------
+    def _table_name(self, table: exp.Table) -> Optional[str]:
+        parts = []
+        if table.args.get('catalog'):
+            parts.append(str(table.catalog))
+        if table.args.get('db'):
+            parts.append(str(table.db))
+        this = table.this
+        if hasattr(this, 'name'):
+            parts.append(str(this.name))
+        else:
+            parts.append(str(this))
+        return _norm(".".join(p for p in parts if p))
 
-        schema_hits = [t for t in candidate_tables if t in self.schema and name in self.schema[t]]
-        if len(schema_hits) == 1:
-            self.logger.debug(f"Schema disambiguated column {name} -> {schema_hits[0]}")
-            return [(schema_hits[0], name)]
-        if len(schema_hits) > 1:
-            self.logger.debug(f"Ambiguous column {name} across {schema_hits}; returning all")
-            return [(t, name) for t in schema_hits]
-
-        guessed = guess_table_from_prefix(name, candidate_tables)
-        if guessed:
-            return [(guessed, name)]
-
-        src_table = self._resolve_table_name(scope, None, cte_map)
-        self.logger.debug(f"Fallback single-table inference for {name} -> {src_table}")
-        return [(src_table, name)]
-
-    def _single_source_alias(self, scope: exp.Select) -> Optional[str]:
-        tables = []
-        from_ = scope.args.get("from")
-        if from_:
-            for t in from_.find_all(exp.Table):
-                tables.append(t)
-        subqueries = []
-        if from_:
-            for s in from_.find_all(exp.Subquery):
-                subqueries.append(s)
-        joins = scope.args.get("joins") or []
-        if joins:
-            return None  # Multiple sources, don't infer
-        if len(tables) == 1 and not subqueries:
-            t = tables[0]
-            # Prefer alias if present, otherwise table name
-            a = normalize_identifier(alias_to_str(getattr(t, "alias", None)))
-            if a:
-                return a
-            name = table_name_of(t)
-            return name.split(".")[-1] if name else None
-        if len(subqueries) == 1 and not tables:
-            s = subqueries[0]
-            return normalize_identifier(alias_to_str(getattr(s, "alias", None)))
-        return None
-
-    def _projection_name_to_expr(self, select_expr: exp.Select) -> Dict[str, exp.Expression]:
-        mapping: Dict[str, exp.Expression] = {}
-        for proj in select_expr.expressions:
-            if isinstance(proj, exp.Alias):
-                alias = normalize_identifier(proj.alias)
-                if alias:
-                    mapping[alias] = proj.this
-        return mapping
-
-    def _resolve_cte_base(self, cte_name: str, cte_map: Dict[str, exp.Expression]) -> str:
-        """Walk a chain of CTEs to find an ultimate base table name.
-
-        If the chain ends in a SELECT with exactly one table in FROM (no joins) and no further CTE indirections, return that table name.
-        Otherwise return the last resolvable name (may be the original CTE name).
-        """
-        seen: set[str] = set()
-        current = cte_name
-        while current in cte_map and current not in seen:
-            seen.add(current)
-            node = cte_map[current]
-            # Unwrap WITH inside CTE definition
-            inner = node.this if isinstance(node, exp.With) else node
-            if not isinstance(inner, exp.Select):
-                break
-            from_ = inner.args.get("from")
-            if not from_:
-                break
-            tables = [table_name_of(t) for t in from_.find_all(exp.Table)]
-            tables = [t for t in tables if t]
-            joins = inner.args.get("joins") or []
-            # If single table and no joins, attempt to follow if that table is itself a CTE
-            if len(tables) == 1 and not joins:
-                nxt = tables[0]
-                if nxt in cte_map and nxt not in seen:
-                    current = nxt
-                    continue
-                # Reached a base table
-                return nxt
-            break
-        return current
-
-    def _enumerate_cte_output_sources(self, cte_name: str, cte_map: Dict[str, exp.Expression], visited: set) -> List[Tuple[str, str]]:
-        """
-        Return list of (source_table, source_column) for the visible output columns of a CTE.
-
-        This method walks through chains of CTEs and unwraps them to their ultimate source tables.
-        It handles complex cases including:
-        - Union CTEs with star expansions
-        - Alias chains with projections and stars
-        - Qualified stars (table.*)
-        - Explicit column filtering and pruning
-
-        Args:
-            cte_name: Name of the CTE to enumerate
-            cte_map: Dictionary mapping CTE names to their expressions
-            visited: Set of already visited CTEs to prevent infinite recursion
-
-        Returns:
-            List of (source_table, source_column) tuples representing the ultimate 
-            physical sources for each visible column in the CTE
-
-        Key behavioral notes:
-        - STOPS enumeration when encountering explicit projections (respects column pruning)
-        - For Union CTEs: merges branch outputs and deduplicates
-        - For star expansions: enumerates all available columns 
-        - Unwraps intermediate CTEs to physical tables when possible
-        """
-        if cte_name in visited:
-            return []
-        visited.add(cte_name)
-        node = cte_map.get(cte_name)
-        if not node:
-            return []
-        inner = node.this if isinstance(node, exp.With) else node
-        if not isinstance(inner, (exp.Select, exp.Union)):
-            return []
-        # UNION root: merge branch outputs and dedupe
-        if isinstance(inner, exp.Union):
-            merged: List[Tuple[str, str]] = []
-            for part in self._get_select_parts(inner):
-                if isinstance(part, exp.Select):
-                    merged.extend(self._enumerate_select_output_sources(part, cte_map, visited))
-            # Deduplicate while preserving order
-            uniq: List[Tuple[str, str]] = []
-            seen = set()
-            for p in merged:
-                if p not in seen:
-                    seen.add(p)
-                    uniq.append(p)
-            return uniq
-        pairs = self._enumerate_select_output_sources(inner, cte_map, visited)
-        if not pairs:
-            # Fallback: attempt to resolve projection aliases explicitly
-            proj_map_inner = self._projection_name_to_expr(inner)
-            fallback: List[Tuple[str, str]] = []
-            for alias_name, ex in proj_map_inner.items():
-                for c in ex.find_all(exp.Column):
-                    for st, sc in self._resolve_column_sources(inner, c, cte_map, proj_map_inner):
-                        if st and sc:
-                            fallback.append((st, sc))
-            if fallback:
-                pairs = fallback
-        # If all pairs reference the CTE itself (or another intermediate CTE), attempt to unwrap to base physical tables
-        unwrapped: List[Tuple[str, str]] = []
-        for st, sc in pairs:
-            if st in cte_map:
-                # For explicit column references, resolve the specific column through the CTE chain
-                # instead of enumerating all columns from the CTE
-                if sc != '*':  # Not a star placeholder
-                    # Create a column reference and resolve it specifically
-                    col_ref = exp.Column(this=exp.Identifier(this=sc), table=exp.Identifier(this=st))
-                    # Use a simple scope for resolution - we just need to trace through the CTE
-                    temp_scope = exp.Select(expressions=[col_ref], from_=exp.From(this=exp.Table(this=st)))
-                    resolved = self._resolve_column_sources(temp_scope, col_ref, cte_map, {})
-                    unwrapped.extend(resolved or [(st, sc)])
-                else:
-                    # For star placeholders, enumerate all columns
-                    deeper = self._enumerate_cte_output_sources(st, cte_map, visited)
-                    unwrapped.extend(deeper or [(st, sc)])
-            else:
-                unwrapped.append((st, sc))
-        # Normalize: if any physical table names present, drop intermediate CTE table-only star placeholders
-        phys = [p for p in unwrapped if p[0] not in cte_map]
-        return phys or unwrapped
-
-    def _enumerate_select_output_sources(self, select_expr: exp.Select, cte_map: Dict[str, exp.Expression], visited: set) -> List[Tuple[str, str]]:
-        """
-        Enumerate output sources for a SELECT expression.
-
-        This method determines the ultimate source tables and columns for a SELECT statement,
-        handling various patterns:
-        - Star-only projections over single tables or joins
-        - Explicit column projections  
-        - Qualified stars (table.*)
-        - Mixed star and explicit projections
-
-        Args:
-            select_expr: The SELECT expression to analyze
-            cte_map: Dictionary of available CTEs
-            visited: Set to track visited CTEs and prevent cycles
-
-        Returns:
-            List of (source_table, source_column) tuples for the SELECT's output columns
-
-        The method respects projection pruning - if a SELECT explicitly projects only certain
-        columns, it will not include other available columns from the source tables.
-        """
-        out: List[Tuple[str, str]] = []
-        # If projection is STAR only and single table source that is a CTE -> recurse
-        star_only = all(isinstance(p, (exp.Star,)) for p in select_expr.expressions)
-        from_ = select_expr.args.get("from")
-        joins = select_expr.args.get("joins") or []
-        base_tables = []
-        if from_:
-            for t in from_.find_all(exp.Table):
-                tn = table_name_of(t)
-                if tn:
-                    base_tables.append(tn)
-        # Include explicit join tables (they may not appear in from_.find_all(exp.Table) if nested structure differs)
-        for j in joins:
-            jt = j.this
-            if isinstance(jt, exp.Table):
-                tn = table_name_of(jt)
-                if tn and tn not in base_tables:
-                    base_tables.append(tn)
-        # Simple chain case
-        if star_only and len(base_tables) == 1 and not joins:
-            base = base_tables[0]
-            if base in cte_map:
-                return self._enumerate_cte_output_sources(base, cte_map, visited)
-            # Base physical table
-            cols = self.schema.get(base, [])
-            if cols:
-                return [(base, normalize_identifier(c)) for c in cols]
-            return [(base, '*')]
-        # STAR over multi-table join: enumerate each side's visible columns
-        if star_only and len(base_tables) > 1:
-            enumerated: List[Tuple[str, str]] = []
-            for bt in base_tables:
-                if bt in cte_map:
-                    enumerated.extend(self._enumerate_cte_output_sources(bt, cte_map, visited))
-                else:
-                    cols = self.schema.get(bt, [])
-                    if cols:
-                        enumerated.extend([(bt, normalize_identifier(c)) for c in cols])
-                    else:
-                        enumerated.append((bt, '*'))
-            return enumerated
-        # Explicit projections: resolve each column expression lineage
-        proj_map = self._projection_name_to_expr(select_expr)
-        for proj in select_expr.expressions:
-            if isinstance(proj, exp.Star):
-                # STAR among explicit columns: expand relative to single table if possible else skip (handled earlier)
-                if len(base_tables) == 1 and not joins:
-                    base = base_tables[0]
-                    if base in cte_map:
-                        out.extend(self._enumerate_cte_output_sources(base, cte_map, visited))
-                    else:
-                        cols = self.schema.get(base, [])
-                        if cols:
-                            out.extend([(base, normalize_identifier(c)) for c in cols])
-                        else:
-                            out.append((base, '*'))
-                continue
-            expr = proj.this if isinstance(proj, exp.Alias) else proj
-            alias = normalize_identifier(proj.alias) if isinstance(proj, exp.Alias) else None
-            
-            # Handle qualified stars (e.g., c3.*)
-            if isinstance(expr, exp.Column) and expr.name == '*' and expr.table:
-                table_name = normalize_identifier(expr.table)
-                if table_name in cte_map:
-                    out.extend(self._enumerate_cte_output_sources(table_name, cte_map, visited))
-                else:
-                    cols = self.schema.get(table_name, [])
-                    if cols:
-                        out.extend([(table_name, normalize_identifier(c)) for c in cols])
-                    else:
-                        out.append((table_name, '*'))
-                continue
-            
-            # Collect columns inside expr
-            cols = list(expr.find_all(exp.Column))
-            if not cols:
-                # If expression is an alias of another alias (e.g., wrapping) try to find inner projection
-                if isinstance(expr, exp.Identifier) and alias and expr.this in proj_map:
-                    inner_expr = proj_map[expr.this]
-                    inner_cols = list(inner_expr.find_all(exp.Column))
-                    for c in inner_cols:
-                        for st, sc in self._resolve_column_sources(select_expr, c, cte_map, proj_map):
-                            if st and sc:
-                                out.append((st, sc))
-                continue
-            temp_select = select_expr  # reuse scope for resolution
-            for c in cols:
-                for st, sc in self._resolve_column_sources(temp_select, c, cte_map, proj_map):
-                    if st and sc:
-                        out.append((st, sc))
-        # Deduplicate preserving order
-        seen_pairs = set()
-        dedup: List[Tuple[str, str]] = []
-        for p in out:
-            if p not in seen_pairs:
-                seen_pairs.add(p)
-                dedup.append(p)
-        return dedup

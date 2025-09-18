@@ -1,5 +1,5 @@
 {
-  "orders": ["customer_id", "total_amount", "order_date"],
+  "orders": ["customer_id", "total_amount", "order_date", "order_id"],
   "customers": ["customer_id", "first_name", "last_name", "status"],
   "x": ["a"],
   "y": ["a", "b", "c", "uid"],
