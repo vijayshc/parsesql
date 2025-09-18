@@ -149,6 +149,9 @@ The extractor performs multi-level CTE analysis to ensure `SELECT *` only expand
 5. Duplicate Suppression with Mixed Projections: In patterns like `SELECT col_a, *, col_a FROM some_cte`, the `*` expansion will suppress `col_a` because it is already explicitly projected, avoiding redundant lineage rows.
 6. Ambiguity Handling: If a `*` spans multiple tables and schema metadata is present, the expansion enumerates concrete columns per table. Without schema, a conservative single `*` placeholder record is emitted.
 7. Undefined Reference Warning: If a final `FROM` references a name that is neither a known table (per schema) nor a defined CTE, a warning is logged to aid in catching typos early.
+8. Alias-qualified Stars (`a.*`): Stars scoped to a table/CTE alias inside a projection are expanded precisely to the visible columns of that alias' source (respecting intermediate projection pruning). In join contexts, `a.*` and `b.*` are each expanded independently; unqualified `*` over a join uses the join's projected columns (not entire base schemas) unless schema-driven multi-table expansion is required.
+9. Multi-table Join `*` Enumeration: When a CTE (or final SELECT) uses an unqualified `*` over a join, the extractor enumerates each participating side's visible columns. Pass-through CTEs are unwrapped so physical base tables appear instead of intermediate CTE names. If schema metadata is available, only columns defined in schema are emitted; otherwise a single `*` placeholder per unresolved table appears.
+10. UNION Star Chains: For a UNION/UNION ALL CTE where each branch projects identical columns (including via `*`), star expansion merges the branches, emitting the unified set of underlying source columns (deduplicated). Branch-specific discrepancies (different expressions) still trace back to their physical sources independently.
 
 ### Practical Examples
 

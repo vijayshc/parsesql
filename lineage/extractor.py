@@ -85,6 +85,11 @@ class LineageExtractor:
         self, stmt: exp.Expression, file: Optional[str] = None
     ) -> List[LineageRecord]:
         self.logger.debug(f"stmt type: {type(stmt)}, is_with: {is_with(stmt)}")
+        # Debug: log raw SQL for statement heads
+        try:
+            self.logger.debug(f"Statement SQL head: {stmt.sql(dialect=self.engine)[:200]}")
+        except Exception:
+            pass
         # Normalize WITH wrapper
         if is_with(stmt):
             inner = stmt.this
@@ -218,8 +223,83 @@ class LineageExtractor:
 
             # Find source columns inside expression
             source_cols = list(expr.find_all(exp.Column))
-            # Handle SELECT * specially: no Column nodes inside Star, so produce mappings
-            if isinstance(expr, exp.Column) and isinstance(expr.this, exp.Identifier) and expr.this.this == '*':
+            # Handle alias-qualified star: a.*
+            if isinstance(expr, exp.Column) and expr.name == '*' and expr.table:
+                alias_name = normalize_identifier(expr.table)
+                alias_map = self._build_alias_map(select_expr)
+                base_name = alias_map.get(alias_name)
+                # If alias refers to a CTE, enumerate its effective outputs
+                if base_name and base_name in cte_map:
+                    for st, sc in self._enumerate_cte_output_sources(base_name, cte_map, set()):
+                        if sc in explicit_simple_cols:
+                            continue
+                        recs.append(LineageRecord(
+                            source_table=st,
+                            source_column=sc,
+                            expression=f"{alias_name}.*",
+                            target_column=None,
+                            target_table=target_table,
+                            file=file,
+                            engine=self.engine,
+                        ))
+                    continue
+                # Alias maps directly to a base table
+                if base_name:
+                    cols = self.schema.get(base_name, [])
+                    if cols:
+                        for c in cols:
+                            if normalize_identifier(c) in explicit_simple_cols:
+                                continue
+                            recs.append(LineageRecord(
+                                source_table=base_name,
+                                source_column=normalize_identifier(c),
+                                expression=f"{alias_name}.*",
+                                target_column=None,
+                                target_table=target_table,
+                                file=file,
+                                engine=self.engine,
+                            ))
+                        continue
+                    else:
+                        # Fallback unresolved star
+                        recs.append(LineageRecord(
+                            source_table=base_name,
+                            source_column='*',
+                            expression=f"{alias_name}.*",
+                            target_column=None,
+                            target_table=target_table,
+                            file=file,
+                            engine=self.engine,
+                        ))
+                        continue
+                # Alias not found (could be CTE alias itself)
+                if alias_name in cte_map:
+                    for st, sc in self._enumerate_cte_output_sources(alias_name, cte_map, set()):
+                        if sc in explicit_simple_cols:
+                            continue
+                        recs.append(LineageRecord(
+                            source_table=st,
+                            source_column=sc,
+                            expression=f"{alias_name}.*",
+                            target_column=None,
+                            target_table=target_table,
+                            file=file,
+                            engine=self.engine,
+                        ))
+                    continue
+                # As last resort, emit unresolved alias star
+                recs.append(LineageRecord(
+                    source_table=alias_name,
+                    source_column='*',
+                    expression=f"{alias_name}.*",
+                    target_column=None,
+                    target_table=target_table,
+                    file=file,
+                    engine=self.engine,
+                ))
+                continue
+            # Handle SELECT * (unqualified) specially: no Column nodes inside Star, so produce mappings
+            if isinstance(expr, exp.Column) and isinstance(expr.this, exp.Identifier) and expr.this.this == '*' and not expr.table:
                 # Improved STAR expansion: respect intermediate CTE projections (do NOT blindly expand to base schema)
                 from_ = select_expr.args.get("from")
                 if not from_:
@@ -460,7 +540,7 @@ class LineageExtractor:
         for alias, base in alias_map.items():
             if alias == name or base.split(".")[-1] == name:
                 return alias
-        # Check subqueries
+        # Check subqueries for projection alias match
         for sub in scope.find_all(exp.Subquery):
             a = normalize_identifier(alias_to_str(getattr(sub, "alias", None)))
             if a:
@@ -469,6 +549,18 @@ class LineageExtractor:
                 for part in parts:
                     if name in self._projection_name_to_expr(part):
                         return a
+        # Additional deep search: unqualified column referencing alias defined only inside a nested subquery
+        for sub in scope.find_all(exp.Subquery):
+            a = normalize_identifier(alias_to_str(getattr(sub, "alias", None)))
+            if not a:
+                continue
+            inner_selects = self._get_select_parts(sub.this)
+            for inner in inner_selects:
+                for proj in inner.expressions:
+                    if isinstance(proj, exp.Alias):
+                        alias_name = normalize_identifier(proj.alias)
+                        if alias_name == name:
+                            return a
         return None
 
     def _get_select_parts(self, query: exp.Expression) -> List[exp.Select]:
@@ -576,7 +668,7 @@ class LineageExtractor:
                             break
                 if expr is None:
                     # If projection includes STAR, attribute to single inner base table when unambiguous
-                    has_star = any(isinstance(p, exp.Star) for p in part.expressions)
+                    has_star = any(isinstance(p, exp.Star) or (isinstance(p, exp.Column) and p.name == '*') for p in part.expressions)
                     if has_star:
                         from_ = part.args.get("from")
                         joins = part.args.get("joins") or []
@@ -694,6 +786,16 @@ class LineageExtractor:
         if alias:
             src_table = self._resolve_table_name(scope, alias, cte_map)
             self.logger.debug(f"Resolving {name} with explicit/derived alias {alias} -> {src_table}")
+            # Subquery alias unwrap
+            sub = self._get_subquery_by_alias(scope, alias)
+            if sub and isinstance(sub, exp.Select):
+                from_ = sub.args.get("from")
+                joins = sub.args.get("joins") or []
+                if from_ and not joins:
+                    inner_tables = [table_name_of(t) for t in from_.find_all(exp.Table)]
+                    inner_tables = [t for t in inner_tables if t]
+                    if len(inner_tables) == 1 and inner_tables[0] in self.schema:
+                        src_table = inner_tables[0]
             return [(src_table, name)]
 
         # Unqualified column disambiguation using schema
@@ -796,15 +898,30 @@ class LineageExtractor:
         return current
 
     def _enumerate_cte_output_sources(self, cte_name: str, cte_map: Dict[str, exp.Expression], visited: set) -> List[Tuple[str, str]]:
-        """Return list of (source_table, source_column) for the visible output columns of a CTE.
+        """
+        Return list of (source_table, source_column) for the visible output columns of a CTE.
 
-        This walks through chains of CTEs when the CTE body is a simple SELECT * from another CTE,
-        but STOPS when:
-          * Projection lists explicit columns (with or without aliases)
-          * Multiple base tables (joins) appear
-          * UNION appears
+        This method walks through chains of CTEs and unwraps them to their ultimate source tables.
+        It handles complex cases including:
+        - Union CTEs with star expansions
+        - Alias chains with projections and stars
+        - Qualified stars (table.*)
+        - Explicit column filtering and pruning
 
-        For explicit projections, each projected column's lineage is resolved via existing column resolution logic.
+        Args:
+            cte_name: Name of the CTE to enumerate
+            cte_map: Dictionary mapping CTE names to their expressions
+            visited: Set of already visited CTEs to prevent infinite recursion
+
+        Returns:
+            List of (source_table, source_column) tuples representing the ultimate 
+            physical sources for each visible column in the CTE
+
+        Key behavioral notes:
+        - STOPS enumeration when encountering explicit projections (respects column pruning)
+        - For Union CTEs: merges branch outputs and deduplicates
+        - For star expansions: enumerates all available columns 
+        - Unwraps intermediate CTEs to physical tables when possible
         """
         if cte_name in visited:
             return []
@@ -813,18 +930,79 @@ class LineageExtractor:
         if not node:
             return []
         inner = node.this if isinstance(node, exp.With) else node
-        if not isinstance(inner, exp.Select):
+        if not isinstance(inner, (exp.Select, exp.Union)):
             return []
-        # If UNION inside, gather both sides separately (treat as ambiguous set of sources)
+        # UNION root: merge branch outputs and dedupe
         if isinstance(inner, exp.Union):
-            out: List[Tuple[str, str]] = []
+            merged: List[Tuple[str, str]] = []
             for part in self._get_select_parts(inner):
                 if isinstance(part, exp.Select):
-                    out.extend(self._enumerate_select_output_sources(part, cte_map, visited))
-            return out
-        return self._enumerate_select_output_sources(inner, cte_map, visited)
+                    merged.extend(self._enumerate_select_output_sources(part, cte_map, visited))
+            # Deduplicate while preserving order
+            uniq: List[Tuple[str, str]] = []
+            seen = set()
+            for p in merged:
+                if p not in seen:
+                    seen.add(p)
+                    uniq.append(p)
+            return uniq
+        pairs = self._enumerate_select_output_sources(inner, cte_map, visited)
+        if not pairs:
+            # Fallback: attempt to resolve projection aliases explicitly
+            proj_map_inner = self._projection_name_to_expr(inner)
+            fallback: List[Tuple[str, str]] = []
+            for alias_name, ex in proj_map_inner.items():
+                for c in ex.find_all(exp.Column):
+                    for st, sc in self._resolve_column_sources(inner, c, cte_map, proj_map_inner):
+                        if st and sc:
+                            fallback.append((st, sc))
+            if fallback:
+                pairs = fallback
+        # If all pairs reference the CTE itself (or another intermediate CTE), attempt to unwrap to base physical tables
+        unwrapped: List[Tuple[str, str]] = []
+        for st, sc in pairs:
+            if st in cte_map:
+                # For explicit column references, resolve the specific column through the CTE chain
+                # instead of enumerating all columns from the CTE
+                if sc != '*':  # Not a star placeholder
+                    # Create a column reference and resolve it specifically
+                    col_ref = exp.Column(this=exp.Identifier(this=sc), table=exp.Identifier(this=st))
+                    # Use a simple scope for resolution - we just need to trace through the CTE
+                    temp_scope = exp.Select(expressions=[col_ref], from_=exp.From(this=exp.Table(this=st)))
+                    resolved = self._resolve_column_sources(temp_scope, col_ref, cte_map, {})
+                    unwrapped.extend(resolved or [(st, sc)])
+                else:
+                    # For star placeholders, enumerate all columns
+                    deeper = self._enumerate_cte_output_sources(st, cte_map, visited)
+                    unwrapped.extend(deeper or [(st, sc)])
+            else:
+                unwrapped.append((st, sc))
+        # Normalize: if any physical table names present, drop intermediate CTE table-only star placeholders
+        phys = [p for p in unwrapped if p[0] not in cte_map]
+        return phys or unwrapped
 
     def _enumerate_select_output_sources(self, select_expr: exp.Select, cte_map: Dict[str, exp.Expression], visited: set) -> List[Tuple[str, str]]:
+        """
+        Enumerate output sources for a SELECT expression.
+
+        This method determines the ultimate source tables and columns for a SELECT statement,
+        handling various patterns:
+        - Star-only projections over single tables or joins
+        - Explicit column projections  
+        - Qualified stars (table.*)
+        - Mixed star and explicit projections
+
+        Args:
+            select_expr: The SELECT expression to analyze
+            cte_map: Dictionary of available CTEs
+            visited: Set to track visited CTEs and prevent cycles
+
+        Returns:
+            List of (source_table, source_column) tuples for the SELECT's output columns
+
+        The method respects projection pruning - if a SELECT explicitly projects only certain
+        columns, it will not include other available columns from the source tables.
+        """
         out: List[Tuple[str, str]] = []
         # If projection is STAR only and single table source that is a CTE -> recurse
         star_only = all(isinstance(p, (exp.Star,)) for p in select_expr.expressions)
@@ -836,6 +1014,13 @@ class LineageExtractor:
                 tn = table_name_of(t)
                 if tn:
                     base_tables.append(tn)
+        # Include explicit join tables (they may not appear in from_.find_all(exp.Table) if nested structure differs)
+        for j in joins:
+            jt = j.this
+            if isinstance(jt, exp.Table):
+                tn = table_name_of(jt)
+                if tn and tn not in base_tables:
+                    base_tables.append(tn)
         # Simple chain case
         if star_only and len(base_tables) == 1 and not joins:
             base = base_tables[0]
@@ -846,6 +1031,19 @@ class LineageExtractor:
             if cols:
                 return [(base, normalize_identifier(c)) for c in cols]
             return [(base, '*')]
+        # STAR over multi-table join: enumerate each side's visible columns
+        if star_only and len(base_tables) > 1:
+            enumerated: List[Tuple[str, str]] = []
+            for bt in base_tables:
+                if bt in cte_map:
+                    enumerated.extend(self._enumerate_cte_output_sources(bt, cte_map, visited))
+                else:
+                    cols = self.schema.get(bt, [])
+                    if cols:
+                        enumerated.extend([(bt, normalize_identifier(c)) for c in cols])
+                    else:
+                        enumerated.append((bt, '*'))
+            return enumerated
         # Explicit projections: resolve each column expression lineage
         proj_map = self._projection_name_to_expr(select_expr)
         for proj in select_expr.expressions:
@@ -864,9 +1062,31 @@ class LineageExtractor:
                 continue
             expr = proj.this if isinstance(proj, exp.Alias) else proj
             alias = normalize_identifier(proj.alias) if isinstance(proj, exp.Alias) else None
+            
+            # Handle qualified stars (e.g., c3.*)
+            if isinstance(expr, exp.Column) and expr.name == '*' and expr.table:
+                table_name = normalize_identifier(expr.table)
+                if table_name in cte_map:
+                    out.extend(self._enumerate_cte_output_sources(table_name, cte_map, visited))
+                else:
+                    cols = self.schema.get(table_name, [])
+                    if cols:
+                        out.extend([(table_name, normalize_identifier(c)) for c in cols])
+                    else:
+                        out.append((table_name, '*'))
+                continue
+            
             # Collect columns inside expr
             cols = list(expr.find_all(exp.Column))
             if not cols:
+                # If expression is an alias of another alias (e.g., wrapping) try to find inner projection
+                if isinstance(expr, exp.Identifier) and alias and expr.this in proj_map:
+                    inner_expr = proj_map[expr.this]
+                    inner_cols = list(inner_expr.find_all(exp.Column))
+                    for c in inner_cols:
+                        for st, sc in self._resolve_column_sources(select_expr, c, cte_map, proj_map):
+                            if st and sc:
+                                out.append((st, sc))
                 continue
             temp_select = select_expr  # reuse scope for resolution
             for c in cols:
