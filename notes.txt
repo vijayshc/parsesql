@@ -1,0 +1,211 @@
+SQL LINEAGE PARSER - ENGINEERING NOTES
+=====================================
+
+Purpose
+-------
+Column-level lineage extraction for analytical SQL (Spark/Hive style) covering: SELECT, INSERT (incl. WITH + INSERT, star mapping), UPDATE, MERGE (update + insert branches). Outputs normalized CSV rows of source->target column mappings with expression context, per file, per engine.
+
+High-Level Flow
+---------------
+1. Driver script (`sql_lineage_parser.py`) discovers SQL files and loads schema (CSV > file JSON > inline JSON > global schema.json).
+2. For each file & chosen engine(s), instantiate `LineageExtractor` with normalized schema.
+3. Extractor parses statements with `sqlglot`, handles WITH (CTEs), then dispatches by statement type:
+   - SELECT / UNION -> `SelectAnalyzer`
+   - INSERT -> SELECT lineage + target column inference
+   - UPDATE -> custom assignment lineage (`_extract_update`)
+   - MERGE -> custom clause lineage (`_extract_merge`)
+4. Emit immutable `LineageRecord` objects, write to CSV.
+
+Key Modules (Where to Look)
+--------------------------
+lineage/extractor.py
+  - Orchestrates statement processing.
+  - WITH handling (works for any following statement type).
+  - INSERT column alignment logic: positional + name-based intersection with target schema.
+  - UPDATE lineage extraction: resolves right-hand side column origins with alias normalization.
+  - MERGE lineage extraction: traverses WHEN clauses; handles UPDATE (assignments) & INSERT (VALUES) mapping.
+  - Deduplication and placeholder pruning logic.
+
+lineage/core/analyzer.py
+  - `SelectAnalyzer`: core engine for SELECT/UNION projections.
+  - Builds ordered sources (tables, subqueries, CTEs, VALUES, PIVOT-wrapped sources).
+  - Handles star expansion (qualified/unqualified), union flattening, expression origin tracing (includes window/order-by columns, scalar subqueries, nested selects).
+  - Column disambiguation heuristics (schema-based + prefix inference fallback + deterministic first source tie-breaker).
+  - Pivot wrapping logic: pivot-generated columns mapped back to underlying aggregate input column origins.
+
+lineage/core/sources.py
+  - Abstract base for sources (TableSource, SelectSource) plus AnalysisEnvironment for CTE registration.
+  - `SelectSource` lazily analyzes underlying SELECT only when resolving a column or enumerating output columns.
+
+lineage/core/schema.py
+  - `Schema` abstraction: normalizes names to lowercase, provides column list retrieval, flattening helper via `_flatten_schema` in extractor.
+
+lineage/models.py
+  - Immutable `LineageRecord` dataclass (frozen). CSV header constants.
+
+lineage/logger.py
+  - Configurable logger factory (`get_logger`).
+
+sql_lineage_parser.py
+  - CLI argument parsing, schema ingestion precedence, per-file schema overlay, engine iteration.
+  - Writes final lineage CSV.
+
+Current Feature Coverage (Tested)
+---------------------------------
+SELECT constructs:
+  - Joins (N-way, aliasing) with column disambiguation
+  - CTE chains & nested subqueries (lazy evaluation)
+  - UNION / UNION ALL (branch lineage merged)
+  - Star expansion with pruning (respects intermediate projection narrowing)
+  - Qualified stars (alias.*)
+  - Expression aliases, scalar functions, CASE expressions
+  - Window functions and ORDER BY sources inside windows
+  - PIVOT (columns attributed back to origin columns or all base columns for count(*))
+  - VALUES clause with column alias list synthesis
+
+DML constructs:
+  - INSERT [INTO] target [(col list)] SELECT ...
+    * If target column list omitted: name-based intersection using produced output columns vs target schema.
+    * Avoids misalignment (first_name -> order_id) by requiring match of expression output or origin column to target slot.
+  - UPDATE target SET col = expr [FROM / USING subquery/table]
+    * Resolves origins across target + from sources.
+    * Fallback to target table if column appears only there.
+  - MERGE INTO target USING source ON ... WHEN MATCHED THEN UPDATE ... WHEN NOT MATCHED THEN INSERT (...)
+    * Traverses `whens` list.
+    * UPDATE: extracts assignment RHS origins (alias & subquery aware).
+    * INSERT: index-aligned VALUES expressions -> target column names.
+    * Fallback mapping of unresolved origins to target table only if column exists in target schema.
+
+Output Semantics
+----------------
+LineageRecord fields:
+  - source_table: physical table name (lowercased, dotted if db.table) or empty if constant / unresolved.
+  - source_column: column name or empty if constant.
+  - expression: SQL of the projection/assignment/value expression (normalized via sqlglot dialect rendering) or '*' for star expansions.
+  - target_column: result column (SELECT: projection output alias or column; INSERT/UPDATE/MERGE: assigned/inserted target column).
+  - target_table: for DML (INSERT/UPDATE/MERGE) rows; blank for pure SELECT lineage.
+  - file: originating SQL file path.
+
+Normalization Rules
+-------------------
+- All identifiers lowercased (`_norm`).
+- Dotted names preserved for multi-level (db.table).
+- Deduplication removes identical (source_table, source_column, target_table, target_column, expression) tuples.
+- Placeholder (None,None) origins dropped when concrete origins present for same target/expression group.
+
+Heuristics & Disambiguation
+---------------------------
+1. Single source SELECT: unqualified columns attributed directly.
+2. Multi-source: schema uniqueness test; if column appears in exactly one source schema, choose that.
+3. Prefix inference (TPC-DS style): e.g., ss_ -> store_sales, c_ -> customer (only if participating table present).
+4. Tie-breaker: choose first source order when ambiguity persists (stable & deterministic).
+5. MERGE/UPDATE fallback: if RHS column not qualified and appears in target schema, attribute to target (only if no better alias match found).
+6. INSERT auto-mapping (no target col list): restrict to produced columns that exist in target schema (intersection, in produced order).
+
+Star Expansion Logic
+--------------------
+- Unqualified * enumerates columns from each source in FROM/JOIN order.
+- Qualified star alias.* enumerates columns from the matched source only.
+- Sources with unknown columns (no schema & not a SelectSource with projections) are skipped (prevents fake columns).
+- Star + explicit duplicates collapsed via deduplication later.
+
+Pivot Handling
+--------------
+- PIVOT nodes wrap a base source. Generated pivot columns map to aggregate input origins.
+- If aggregate contains no columns (e.g., count(*)), fall back to all base columns to represent broad dependency.
+
+VALUES Handling
+---------------
+- VALUES sources create synthetic column names (col1, col2, ...) if alias column list absent.
+- Each VALUES column resolves as origin-less (None) unless later overwritten by constant pruning heuristics.
+
+Testing Strategy
+----------------
+- Tests assert triples (target_column, source_table, source_column) for deterministic validation.
+- MERGE variants: update-only, insert-only, update+insert, update with expression.
+- Edge cases: star + explicit columns, CTE chain pruning, mixed star + explicit, window functions, pivot expansion.
+
+Common Extension Points (Future Self)
+-------------------------------------
+1. Function Lineage: create registry mapping known SQL functions to argument pass-through semantics (e.g., COALESCE -> union of origins; simple arithmetic -> pass-through). Currently origins rely on raw column collection; extend for UDF provenance if needed.
+2. Constant Classification: differentiate literal-only expressions vs derived (e.g., mark constant in LineageRecord with an extra field if schema evolves).
+3. Data Type Propagation: augment Schema to store types (already captured from CSV) and attach to origins.
+4. Multi-engine Dialect Differences: unify dialect-specific AST quirks (currently mostly Spark/Hive). Add translation if expanding to Snowflake/BigQuery.
+5. MERGE Enhancements: support DELETE actions and multi-when precedence; add detection for overlapping update vs insert columns.
+6. Cyclic CTE Guardrails: add detection to prevent pathological recursion (currently relies on sqlglot producing finite ASTs).
+7. Performance: cache SelectAnalyzer results per (select_node_id, schema_version) if analyzing same subquery multiple times across statements.
+
+Operational Usage Tips
+----------------------
+- Provide as complete a schema as possible for highest accuracy (especially for ambiguity reduction in joins).
+- To analyze a single file quickly: `python sql_lineage_parser.py --sql-folder sql --output tmp.csv --engines spark` then inspect `tmp.csv`.
+- Add per-file schema override by dropping a sibling `<file>_schema.json` next to the SQL file; it's merged over global schema.
+- Use `--schema-csv` for large catalogs; global JSON for small targeted tests.
+- Logging: set `LOG_LEVEL=DEBUG` env to trace parse attempts per engine.
+
+Design Rationale Recap
+----------------------
+- Immutability (frozen dataclass) forces explicit reconstruction, reducing accidental in-place mutation bugs.
+- Separation of concerns: extractor does orchestration; analyzer does pure projection lineage; sources abstract table/CTE differences.
+- Lazy evaluation minimizes work and keeps mental model simple (only analyze what is referenced).
+
+Edge Cases Handled
+------------------
+- Star after projection pruning inside chained CTEs.
+- CASE expressions with multiple column references (all collected as origins).
+- Window ORDER BY column origins included even if not in select list.
+- Subqueries inside expressions (scalar) contribute origins.
+- Pivot produced columns attribute back to base columns or full set for COUNT(*).
+- MERGE assignments with alias referencing USING subquery alias or base table.
+- INSERT with subset of columns vs target schema with more columns (only overlapping columns mapped).
+
+Known Limitations / Accepted Trade-offs
+---------------------------------------
+- If ambiguous column appears in multiple sources and schema lists it in >1 table, only first-source heuristic may select a single table (could optionally emit multiple rows to represent ambiguity if required by downstream consumer).
+- Fallback mapping of unresolved MERGE/UPDATE columns to target may over-assign in extremely complex multi-source merges (mitigated by current test scope).
+- UNION branch-specific aliases lost if branches diverge (current approach merges origins but not distinct positional semantics).
+
+Quick Start Commands
+--------------------
+Create venv & run tests:
+  python -m venv venv
+  source venv/bin/activate
+  pip install -r requirements.txt
+  PYTHONPATH=. pytest -q
+
+Run lineage over provided sql folder:
+  python sql_lineage_parser.py --sql-folder sql --output output.csv --engines spark
+
+Run with schema CSV:
+  python sql_lineage_parser.py --sql-folder sql --schema-csv schema.csv --output output.csv --engines spark
+
+Glossary
+--------
+SourceBase: abstract provider of output columns + column resolution (table, select, pivot-wrapped, values).
+Origin (ColumnOrigin): tuple of (table, column) representing a physical dependency.
+ExpressionLineage: analyzer intermediate containing expression SQL, output column, and origin list.
+LineageRecord: final emitted row including DML target context.
+AnalysisEnvironment: registry for CTE SelectSources.
+
+Troubleshooting Cheatsheet
+--------------------------
+Issue: Missing columns in star expansion -> Ensure schema includes the table or CTE projection exposes columns; unknown sources skipped.
+Issue: Column attributed to wrong table in join -> Provide schema so disambiguation uniqueness succeeds; review prefix heuristic ordering.
+Issue: No lineage for MERGE -> Confirm WHEN clauses parsed; enable DEBUG logging; check sqlglot dialect compatibility (`--engines spark`).
+Issue: INSERT misaligned target columns -> Ensure target schema columns exist; if no explicit column list, produced columns must match schema names.
+
+Future Hardening Ideas
+----------------------
+- Add config flag to emit ambiguous origins as multi-row rather than first-source resolution.
+- Track and emit constant vs derived flag.
+- Integrate data lineage graph export (e.g., Graphviz or JSON model). 
+- Add caching for repeated subquery analyses across files.
+
+Testing Gaps To Consider Later
+------------------------------
+- MERGE with DELETE clause (not yet implemented)
+- UPDATE with correlated subquery in assignment expression
+- INSERT ... SELECT with UNION inside SELECT part
+- VALUES inside MERGE USING (currently basic alias mapping only)
+
+End of Notes.

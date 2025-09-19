@@ -91,6 +91,7 @@ class LineageExtractor:
                 if not name:
                     continue
                 inner = cte.this
+                # Register only SELECT/UNION CTEs; others ignored but name reserved for potential future extension
                 if isinstance(inner, (exp.Select, exp.Union)):
                     env.register(name, SelectSource(inner, env, self.schema))
             if isinstance(stmt, exp.With):
@@ -174,6 +175,11 @@ class LineageExtractor:
                 # Fallback: if this is an INSERT context and target_col not set but el.output_column matches one of target_cols
                 if target_table and not target_col and el.output_column in target_cols:
                     target_col = el.output_column
+                # Additional fallback: if INSERT with star expansion over CTE and origin is placeholder (None,None), attempt name-based mapping
+                if target_table and el.expression_sql == '*' and (not origin.table and not origin.column):
+                    # If we have a corresponding produced output column name at same index, use it as target column directly
+                    if not target_col and el.output_column:
+                        target_col = el.output_column
                 rows.append(
                     LineageRecord(
                         source_table=origin.table,

@@ -68,6 +68,9 @@ class SelectAnalyzer:
             elif isinstance(expr, exp.Column):
                 out_col = _norm(expr.name)
             origins = self._origins_for_expression(expr, sources)
+            # If column expression with no resolved origins, attach placeholder
+            if isinstance(expr, exp.Column) and not any(o.table or o.column for o in origins):
+                origins = [ColumnOrigin(table=None, column=None)]
             lineages.append(ExpressionLineage(expression_sql=expr_sql(expr, self.dialect), output_column=out_col, origins=tuple(origins)))
         return lineages
 
@@ -243,7 +246,9 @@ class SelectAnalyzer:
         if not cols and not out:
             return [ColumnOrigin(table=None, column=None)]
         for c in cols:
-            out.extend(self._resolve_column(c, sources))
+            resolved = self._resolve_column(c, sources)
+            # If resolution returns placeholder only and we have multiple sources with entirely unknown schemas (all '*'), keep placeholder
+            out.extend(resolved)
         # Deduplicate
         seen = set()
         dedup: List[ColumnOrigin] = []
@@ -272,6 +277,9 @@ class SelectAnalyzer:
                 else:
                     cleaned.extend(items)
             dedup = cleaned
+        # If no origins resolved at all (unknown schema or star-only upstream), return a single placeholder origin
+        if not dedup:
+            return [ColumnOrigin(table=None, column=None)]
         return dedup
 
     def _wrap_pivots(self, base_src: SourceBase, pivot_nodes: List[exp.Pivot]) -> SourceBase:
