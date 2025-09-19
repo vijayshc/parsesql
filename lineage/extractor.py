@@ -99,6 +99,38 @@ class LineageExtractor:
             else:
                 core_stmt = stmt
 
+        # CREATE TABLE AS SELECT (CTAS) handling: treat similar to INSERT
+        if isinstance(core_stmt, exp.Create):
+            # Only handle CTAS when expression contains a SELECT/UNION
+            expression = core_stmt.args.get('expression')
+            if isinstance(expression, (exp.Select, exp.Union)):
+                target_table = None
+                this_arg = core_stmt.this
+                if isinstance(this_arg, exp.Table):
+                    target_table = self._table_name(this_arg)
+                analyzer = SelectAnalyzer(expression, env, self.schema, self.engine)
+                expr_lineages = analyzer.analyze()
+                rows: List[LineageRecord] = []
+                for el in expr_lineages:
+                    # Determine target column: alias/output name else first origin column
+                    tgt_col = el.output_column
+                    if not tgt_col:
+                        if el.origins and el.origins[0].column:
+                            tgt_col = el.origins[0].column
+                    for origin in el.origins:
+                        rows.append(
+                            LineageRecord(
+                                source_table=origin.table,
+                                source_column=origin.column,
+                                expression=el.expression_sql,
+                                target_column=tgt_col,
+                                target_table=target_table,
+                                file=file,
+                                engine=self.engine,
+                            )
+                        )
+                return rows
+
         # INSERT target handling
         target_table = None
         target_cols: List[str] = []

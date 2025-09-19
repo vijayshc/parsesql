@@ -542,3 +542,78 @@ def test_tpcds_window_function():
     # rn has two origins
     assert ('rn','store_sales','ss_ext_sales_price') in triples
     assert ('rn','store_sales','ss_store_sk') in triples
+
+
+def test_ctas_basic_subset():
+    sql = """
+    CREATE TABLE tgt_basic AS
+    SELECT customer_id, first_name FROM customers
+    """
+    recs = _extract(sql)
+    triples = _triples(recs)
+    assert ('customer_id','customers','customer_id') in triples
+    assert ('first_name','customers','first_name') in triples
+    # target_table should be tgt_basic for mapped columns
+    assert any(r.target_table=='tgt_basic' for r in recs)
+
+def test_ctas_star():
+    sql = "CREATE TABLE tgt_star AS SELECT * FROM customers"
+    recs = _extract(sql)
+    triples = _triples(recs)
+    # All customer columns should map
+    expected = {
+        ('customer_id','customers','customer_id'),
+        ('first_name','customers','first_name'),
+        ('last_name','customers','last_name'),
+        ('status','customers','status'),
+    }
+    assert expected.issubset(triples)
+
+def test_ctas_join_alias_expression():
+    sql = """
+    CREATE TABLE tgt_join AS
+    SELECT c.customer_id, o.order_id, o.total_amount * 1.1 AS gross
+    FROM customers c JOIN orders o ON c.customer_id = o.customer_id
+    """
+    schema = {
+        'customers': ['customer_id','first_name','last_name','status'],
+        'orders': ['customer_id','total_amount','order_date','order_id']
+    }
+    recs = _extract(sql, schema=schema)
+    triples = _triples(recs)
+    assert ('customer_id','customers','customer_id') in triples
+    assert ('order_id','orders','order_id') in triples
+    assert ('gross','orders','total_amount') in triples
+
+def test_ctas_with_cte_chain():
+    sql = """
+    WITH base AS (SELECT * FROM customers), j AS (SELECT customer_id FROM base)
+    CREATE TABLE tgt_chain AS SELECT customer_id FROM j
+    """
+    recs = _extract(sql)
+    triples = _triples(recs)
+    assert ('customer_id','customers','customer_id') in triples
+    assert any(r.target_table=='tgt_chain' for r in recs)
+
+def test_ctas_constants_and_multi_origin():
+    sql = """
+    CREATE TABLE tgt_expr AS
+    SELECT c.customer_id, o.order_id, o.total_amount + 5 AS adjusted
+    FROM customers c JOIN orders o ON c.customer_id = o.customer_id
+    """
+    schema = {
+        'customers': ['customer_id','first_name','last_name','status'],
+        'orders': ['customer_id','total_amount','order_date','order_id']
+    }
+    recs = _extract(sql, schema=schema)
+    triples = _triples(recs)
+    assert ('adjusted','orders','total_amount') in triples
+
+def test_ctas_create_or_replace():
+    sql = """
+    CREATE OR REPLACE TABLE tgt_replace AS
+    SELECT customer_id FROM customers
+    """
+    recs = _extract(sql)
+    triples = _triples(recs)
+    assert ('customer_id','customers','customer_id') in triples

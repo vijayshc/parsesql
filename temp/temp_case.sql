@@ -1,1 +1,4 @@
-SELECT ss_customer_sk, ROW_NUMBER() OVER (PARTITION BY ss_store_sk ORDER BY ss_ext_sales_price DESC) AS rn FROM store_sales
+
+    CREATE OR REPLACE TABLE tgt_replace AS
+    SELECT customer_id FROM customers
+    
