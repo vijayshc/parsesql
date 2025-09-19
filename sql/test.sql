@@ -1,3 +1,3 @@
-with customers2 as (select * from customers)
-,customre3 as (select * from customers2)
-select * from customre3;
+create table test1 as select * from customers;
+
+select customer_id, order_id, total_amount * 1.1 as adjusted from test1;

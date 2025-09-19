@@ -1,4 +1,8 @@
 source_table,source_column,expression,target_column,target_table,file
+customers,customer_id,*,customer_id,test1,sql/test.sql
+customers,first_name,*,first_name,test1,sql/test.sql
+customers,last_name,*,last_name,test1,sql/test.sql
+customers,status,*,status,test1,sql/test.sql
 test1,customer_id,customer_id,customer_id,,sql/test.sql
 test1,order_id,order_id,order_id,,sql/test.sql
 test1,total_amount,total_amount * 1.1,adjusted,,sql/test.sql
@@ -22,7 +26,6 @@ customers,customer_id,*,customer_id,,sql/test_cte_projection_prune.sql
 customers,first_name,*,first_name,,sql/test_cte_projection_prune.sql
 customers,customer_id,*,customer_id,,sql/test_cte_union_star.sql
 customers,first_name,*,first_name,,sql/test_cte_union_star.sql
-,,*,customer_name,orders,sql/test_new.sql
 ,,*,customer_id,orders,sql/test_new.sql
 ,,*,order_id,orders,sql/test_new.sql
 customers,customer_id,c.customer_id,customer_id,,sql/test_plain_complex.sql

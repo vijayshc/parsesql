@@ -142,6 +142,7 @@ Operational Usage Tips
 - Add per-file schema override by dropping a sibling `<file>_schema.json` next to the SQL file; it's merged over global schema.
 - Use `--schema-csv` for large catalogs; global JSON for small targeted tests.
 - Logging: set `LOG_LEVEL=DEBUG` env to trace parse attempts per engine.
+- Multi-statement files: CTAS statements dynamically register created table schemas in-memory for subsequent statements in the SAME file (e.g., `CREATE TABLE t1 AS ...; SELECT ... FROM t1;`). This allows downstream SELECT/INSERT/UPDATE/MERGE to resolve the newly created table without it existing in the input schema.
 
 Design Rationale Recap
 ----------------------

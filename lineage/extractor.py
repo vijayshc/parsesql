@@ -62,8 +62,36 @@ class LineageExtractor:
             sql_text = f.read()
         statements = self._parse(sql_text)
         all_rows: List[LineageRecord] = []
+        # Maintain a per-file mutable schema overlay (copy base) to allow CTAS created tables to be visible to later statements.
+        original_schema = self.schema
+        dynamic_schema_tables = dict(self.schema.tables)
+        self.schema = Schema(dynamic_schema_tables)
         for stmt in statements:
-            all_rows.extend(self._extract_statement(stmt, file=path))
+            rows = self._extract_statement(stmt, file=path)
+            all_rows.extend(rows)
+            # After processing a statement, if it's a CTAS, derive and register target table schema for subsequent statements
+            try:
+                if isinstance(stmt, exp.Create):
+                    expr = stmt.args.get('expression')
+                    this_arg = stmt.this if hasattr(stmt, 'this') else None
+                    if isinstance(expr, (exp.Select, exp.Union)) and isinstance(this_arg, exp.Table):
+                        target_name = self._table_name(this_arg)
+                        # Collect target columns from rows belonging to this target_table
+                        if target_name:
+                            tgt_cols = [r.target_column for r in rows if r.target_table == target_name and r.target_column]
+                            # Deduplicate preserving order
+                            seen = set(); ordered=[]
+                            for c in tgt_cols:
+                                if c not in seen:
+                                    seen.add(c); ordered.append(c)
+                            if ordered:
+                                dynamic_schema_tables[target_name] = ordered
+                                self.schema = Schema(dynamic_schema_tables)
+            except Exception:
+                # Do not fail lineage on dynamic registration issues
+                pass
+        # Restore original schema reference (defensive, though extractor instance per invocation)
+        self.schema = original_schema
         return all_rows
 
     # --------------- internal ---------------
@@ -111,6 +139,23 @@ class LineageExtractor:
                 analyzer = SelectAnalyzer(expression, env, self.schema, self.engine)
                 expr_lineages = analyzer.analyze()
                 rows: List[LineageRecord] = []
+                # If SELECT * and no origins resolved (placeholder), try to derive columns from underlying single table sources
+                if isinstance(expression, exp.Select) and any(el.expression_sql=='*' for el in expr_lineages):
+                    # Gather FROM base table(s)
+                    base = expression.args.get('from')
+                    base_tables = []
+                    if base and isinstance(base.this, exp.Table):
+                        base_tables.append(self._table_name(base.this))
+                    # Only expand when exactly one resolvable base table with schema
+                    if len(base_tables)==1 and base_tables[0] and self.schema.columns(base_tables[0]):
+                        cols = self.schema.columns(base_tables[0])
+                        # Replace expr_lineages with synthetic lineage objects for each column if none had concrete origins
+                        if all(not any(o.table for o in el.origins) for el in expr_lineages):
+                            from lineage.core.origin import ColumnOrigin, ExpressionLineage
+                            expr_lineages = [
+                                ExpressionLineage(expression_sql='*', output_column=c, origins=(ColumnOrigin(table=base_tables[0], column=c),))
+                                for c in cols
+                            ]
                 for el in expr_lineages:
                     # Determine target column: alias/output name else first origin column
                     tgt_col = el.output_column
@@ -210,8 +255,14 @@ class LineageExtractor:
                 # Additional fallback: if INSERT with star expansion over CTE and origin is placeholder (None,None), attempt name-based mapping
                 if target_table and el.expression_sql == '*' and (not origin.table and not origin.column):
                     # If we have a corresponding produced output column name at same index, use it as target column directly
+                    # BUT only if it exists in target schema
                     if not target_col and el.output_column:
-                        target_col = el.output_column
+                        target_schema_cols = list(self.schema.columns(target_table))
+                        if el.output_column in target_schema_cols:
+                            target_col = el.output_column
+                # For INSERT statements, skip records without valid target columns
+                if target_table and not target_col:
+                    continue
                 rows.append(
                     LineageRecord(
                         source_table=origin.table,

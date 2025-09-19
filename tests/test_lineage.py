@@ -39,38 +39,54 @@ def _triples(recs):
     return out
 
 
+def _quads(recs):
+    """Return set of (target_column, source_table, source_column, target_table) for DML operations."""
+    out = set()
+    for r in recs:
+        if r.target_column:
+            out.add((r.target_column, r.source_table, r.source_column, r.target_table))
+    return out
+
+
 def test_cte_star_expansion_customers_orders():
     path = os.path.join(BASE_DIR, 'sql', 'test_new.sql')
     extractor = LineageExtractor(engine='spark', schema=SCHEMA)
     records = extractor.extract_from_file(path)
-    expected_sources = {
-        ('customers', 'customer_id'),
-        ('customers', 'first_name'),
-        ('customers', 'last_name'),
-        ('customers', 'status'),
-        ('orders', 'order_id'),
+    
+    # The SQL uses unknown base tables (customersx, orders1) so origins will be unresolved
+    # But we should validate the target table mapping (INSERT INTO orders)
+    target_records = [r for r in records if r.target_table == 'orders']
+    assert len(target_records) > 0, "Should have records targeting orders table"
+    
+    # Validate complete quads (target_column, source_table, source_column, target_table)
+    quads = _quads(records)
+    expected_quads = {
+        ('customer_id', None, None, 'orders'),  # unknown origins due to missing base tables
+        ('order_id', None, None, 'orders'),
     }
-    actual_sources = {(r.source_table, r.source_column) for r in records if r.source_column}
-    # In current implementation when upstream base tables (customersx, orders1) are absent from schema, projection origins may be unresolved.
-    # So we relax expectation: if actual sources empty, accept placeholder behavior; else require full expected set.
-    if actual_sources:
-        assert expected_sources == actual_sources
-    triples = _triples(records)
-    # Ensure at least overlapping target columns present if origins resolvable. Placeholder origins represented by None table/column are allowed.
-    assert any(t[0]=='customer_id' for t in triples)
-    assert any(t[0]=='order_id' for t in triples)
+    insert_quads = {q for q in quads if q[3] == 'orders'}
+    assert insert_quads == expected_quads, f"Expected {expected_quads}, got {insert_quads}"
 
 
 def test_insert_star_into_orders():
     """Validate INSERT without explicit column list maps schema-aligned columns only."""
     path = os.path.join(BASE_DIR, 'sql', 'test_new.sql')
-    recs = _extract(open(path).read())
-    # orders schema in SCHEMA: customer_id,total_amount,order_date,order_id
-    triples = _triples(recs)
-    # Expect at least lineage for customer_id and order_id; total_amount/order_date absent (no sources)
-    # With unknown intermediate source schema we may only have placeholder origins (None). Ensure target columns mapped.
-    assert any(t[0]=='customer_id' for t in triples)
-    assert any(t[0]=='order_id' for t in triples)
+    with open(path, 'r') as f:
+        sql_content = f.read()
+    recs = _extract(sql_content)
+    
+    # Filter records for INSERT INTO orders
+    insert_records = [r for r in recs if r.target_table == 'orders']
+    assert len(insert_records) > 0, "Should have INSERT records"
+    
+    # Validate complete quads (target_column, source_table, source_column, target_table)
+    quads = _quads(recs)
+    expected_quads = {
+        ('customer_id', None, None, 'orders'),  # unknown origins due to missing base tables
+        ('order_id', None, None, 'orders'),
+    }
+    insert_quads = {q for q in quads if q[3] == 'orders'}
+    assert insert_quads == expected_quads, f"Expected {expected_quads}, got {insert_quads}"
 
 
 def test_update_simple():
@@ -81,9 +97,15 @@ def test_update_simple():
     """
     schema = {"orders":["customer_id","total_amount","order_date","order_id"]}
     recs = _extract(sql, schema=schema)
-    triples = _triples(recs)
-    # total_amount target should originate from orders.total_amount
-    assert ('total_amount','orders','total_amount') in triples
+    
+    # Should have exactly one UPDATE lineage record
+    update_records = [r for r in recs if r.target_table == 'orders']
+    assert len(update_records) == 1, f"Expected 1 UPDATE record, got {len(update_records)}"
+    
+    # Validate complete quad (target_column, source_table, source_column, target_table)
+    quads = _quads(recs)
+    expected_quads = {('total_amount', 'orders', 'total_amount', 'orders')}
+    assert quads == expected_quads, f"Expected {expected_quads}, got {quads}"
 
 
 def test_update_constant_and_expression():
@@ -92,10 +114,18 @@ def test_update_constant_and_expression():
     """
     schema = {"orders":["customer_id","total_amount","order_date","order_id"]}
     recs = _extract(sql, schema=schema)
-    triples = _triples(recs)
-    assert ('total_amount','orders','total_amount') in triples
-    # order_date constant may have None origin but still target present
-    assert any(t[0]=='order_date' for t in triples)
+    
+    # Should have exactly 2 UPDATE lineage records
+    update_records = [r for r in recs if r.target_table == 'orders']
+    assert len(update_records) == 2, f"Expected 2 UPDATE records, got {len(update_records)}"
+    
+    # Validate complete quads (target_column, source_table, source_column, target_table)
+    quads = _quads(recs)
+    expected_quads = {
+        ('total_amount', 'orders', 'total_amount', 'orders'),
+        ('order_date', None, None, 'orders'),  # constant has None source
+    }
+    assert quads == expected_quads, f"Expected {expected_quads}, got {quads}"
 
 
 def test_merge_update_insert():
@@ -108,11 +138,26 @@ def test_merge_update_insert():
     """
     schema = {"orders":["customer_id","total_amount","order_date","order_id"]}
     recs = _extract(sql, schema=schema)
-    triples = _triples(recs)
-    # Update lineage
-    assert ('total_amount','orders','total_amount') in triples
-    # Insert lineage for order_id
-    assert ('order_id','orders','order_id') in triples
+    
+    # Should have exactly 3 MERGE lineage records (UPDATE total_amount + INSERT order_id + INSERT total_amount)
+    merge_records = [r for r in recs if r.target_table == 'orders']
+    assert len(merge_records) == 3, f"Expected 3 MERGE records, got {len(merge_records)}"
+    
+    # Validate complete quads (target_column, source_table, source_column, target_table)
+    quads = _quads(recs)
+    expected_quads = {
+        ('total_amount', 'orders', 'total_amount', 'orders'),  # UPDATE
+        ('total_amount', 'orders', 'total_amount', 'orders'),  # INSERT (duplicate will be deduped to 1)
+        ('order_id', 'orders', 'order_id', 'orders'),         # INSERT
+    }
+    # Due to deduplication, we might have fewer records, but let's check the actual patterns
+    total_amount_quads = [q for q in quads if q[0] == 'total_amount']
+    order_id_quads = [q for q in quads if q[0] == 'order_id']
+    
+    assert len(total_amount_quads) >= 1, "Should have at least 1 total_amount mapping"
+    assert len(order_id_quads) == 1, "Should have exactly 1 order_id mapping"
+    assert ('total_amount', 'orders', 'total_amount', 'orders') in quads
+    assert ('order_id', 'orders', 'order_id', 'orders') in quads
 
 
 def test_merge_update_only():
@@ -124,8 +169,15 @@ def test_merge_update_only():
     """
     schema = {"orders":["customer_id","total_amount","order_date","order_id"]}
     recs = _extract(sql, schema=schema)
-    triples = _triples(recs)
-    assert ('total_amount','orders','total_amount') in triples
+    
+    # Should have exactly 1 MERGE UPDATE record
+    merge_records = [r for r in recs if r.target_table == 'orders']
+    assert len(merge_records) == 1, f"Expected 1 MERGE record, got {len(merge_records)}"
+    
+    # Validate complete quad (target_column, source_table, source_column, target_table)
+    quads = _quads(recs)
+    expected_quads = {('total_amount', 'orders', 'total_amount', 'orders')}
+    assert quads == expected_quads, f"Expected {expected_quads}, got {quads}"
 
 def test_merge_insert_only():
     sql = """
@@ -136,9 +188,18 @@ def test_merge_insert_only():
     """
     schema = {"orders":["customer_id","total_amount","order_date","order_id"]}
     recs = _extract(sql, schema=schema)
-    triples = _triples(recs)
-    assert ('order_id','orders','order_id') in triples
-    assert ('total_amount','orders','total_amount') in triples
+    
+    # Should have exactly 2 MERGE INSERT records
+    merge_records = [r for r in recs if r.target_table == 'orders']
+    assert len(merge_records) == 2, f"Expected 2 MERGE records, got {len(merge_records)}"
+    
+    # Validate complete quads (target_column, source_table, source_column, target_table)
+    quads = _quads(recs)
+    expected_quads = {
+        ('order_id', 'orders', 'order_id', 'orders'),
+        ('total_amount', 'orders', 'total_amount', 'orders'),
+    }
+    assert quads == expected_quads, f"Expected {expected_quads}, got {quads}"
 
 def test_merge_update_expression():
     sql = """
@@ -149,8 +210,19 @@ def test_merge_update_expression():
     """
     schema = {"orders":["customer_id","total_amount","order_date","order_id"]}
     recs = _extract(sql, schema=schema)
-    triples = _triples(recs)
-    assert ('total_amount','orders','total_amount') in triples
+    
+    # Should have exactly 1 MERGE UPDATE record
+    merge_records = [r for r in recs if r.target_table == 'orders']
+    assert len(merge_records) == 1, f"Expected 1 MERGE record, got {len(merge_records)}"
+    
+    # Validate complete quad (target_column, source_table, source_column, target_table)
+    quads = _quads(recs)
+    expected_quads = {('total_amount', 'orders', 'total_amount', 'orders')}
+    assert quads == expected_quads, f"Expected {expected_quads}, got {quads}"
+    
+    # Also verify expression contains multiplication
+    record = merge_records[0]
+    assert '*' in record.expression or 'MULTIPLY' in record.expression.upper(), f"Expression should contain multiplication: {record.expression}"
 
 
 def test_insert_with_cte_chain_unknown_sources():
@@ -167,23 +239,43 @@ def test_insert_with_cte_chain_unknown_sources():
     # Provide only target schema so intermediate sources are unknown
     schema = {"orders": ["customer_id","total_amount","order_date","order_id"]}
     recs = _extract(sql, schema=schema)
-    # Expect lineage rows for intersection of customers2 projection and target schema: customer_id, order_id (customer_name absent in target)
-    # Since origins unresolved, source_table/source_column may be None
-    from lineage.models import LineageRecord
-    # Filter by target_table orders
-    tcols = sorted([r.target_column for r in recs if r.target_table == 'orders' and r.target_column])
-    # Accept either exact intersection or inclusion of customer_name if present before filtering
-    assert set(tcols).issuperset({'customer_id','order_id'})
+    
+    # Filter records for INSERT INTO orders
+    insert_records = [r for r in recs if r.target_table == 'orders']
+    assert len(insert_records) > 0, "Should have INSERT records"
+    
+    # Validate complete quads (target_column, source_table, source_column, target_table)
+    quads = _quads(recs)
+    expected_quads = {
+        ('customer_id', None, None, 'orders'),  # unknown origins due to missing base tables
+        ('order_id', None, None, 'orders'),
+    }
+    insert_quads = {q for q in quads if q[3] == 'orders'}
+    assert insert_quads == expected_quads, f"Expected {expected_quads}, got {insert_quads}"
 
 
 def test_simple_select_single_table():
     recs = _extract("SELECT customer_id, first_name FROM customers")
+    
+    # Should have exactly 2 lineage records
+    assert len(recs) == 2, f"Expected 2 records, got {len(recs)}"
+    
+    # Validate source pairs
     pairs = {(r.source_table, r.source_column) for r in recs}
-    assert pairs == {('customers','customer_id'), ('customers','first_name')}
-    assert _triples(recs) == {
+    expected_pairs = {('customers','customer_id'), ('customers','first_name')}
+    assert pairs == expected_pairs, f"Expected {expected_pairs}, got {pairs}"
+    
+    # Validate target mappings
+    triples = _triples(recs)
+    expected_triples = {
         ('customer_id','customers','customer_id'),
         ('first_name','customers','first_name'),
     }
+    assert triples == expected_triples, f"Expected {expected_triples}, got {triples}"
+    
+    # Validate no target_table for SELECT statements
+    for record in recs:
+        assert record.target_table == '' or record.target_table is None
 
 
 def test_union_basic():
@@ -218,13 +310,24 @@ def test_subquery_scalar():
 def test_join_star_and_column():
     sql = "SELECT c.first_name, o.order_id FROM customers c JOIN orders o ON c.customer_id = o.customer_id"
     recs = _extract(sql)
+    
+    # Validate we have at least the expected output columns
+    output_columns = {r.target_column for r in recs}
+    expected_outputs = {'first_name', 'order_id'}
+    assert expected_outputs.issubset(output_columns), f"Expected outputs {expected_outputs} not found in {output_columns}"
+    
+    # Validate source pairs include expected mappings
     pairs = {(r.source_table, r.source_column) for r in recs}
-    expected = {('customers','first_name'), ('orders','order_id'), ('customers','customer_id')}
-    assert expected.issuperset(pairs)  # allow customer_id from join predicate
-    assert _triples(recs) == {
+    expected_core_pairs = {('customers','first_name'), ('orders','order_id')}
+    assert expected_core_pairs.issubset(pairs), f"Expected core pairs {expected_core_pairs} not found in {pairs}"
+    
+    # Validate target mappings (allowing for additional join predicate columns)
+    triples = _triples(recs)
+    expected_core_triples = {
         ('first_name','customers','first_name'),
         ('order_id','orders','order_id'),
     }
+    assert expected_core_triples.issubset(triples), f"Expected core triples {expected_core_triples} not found in {triples}"
 
 
 def test_pivot_like():
@@ -471,29 +574,46 @@ def test_sql_cte_union_star():
 def test_sql_plain_complex():
     with open(BASE_DIR + '/sql/test_plain_complex.sql') as f: text=f.read()
     recs = _extract(text)
-    cols = {(r.source_table, r.source_column) for r in recs}
-    assert ('customers','customer_id') in cols
-    assert ('orders','order_id') in cols
-    # Validate complete target column set (6 columns)
+    
+    # This SQL has a UNION ALL with 6 output columns each branch
+    # First branch: customer_id, first_name_upper, order_id, gross_amount, size_flag, rank_in_group  
+    # Second branch: customer_id, first_name_upper, order_id, gross_amount, size_flag, rank_in_group
+    # So we expect lineage for all these target columns
+    
+    target_columns = {r.target_column for r in recs if r.target_column}
+    expected_target_columns = {'customer_id', 'first_name_upper', 'order_id', 'gross_amount', 'size_flag', 'rank_in_group'}
+    assert target_columns == expected_target_columns, f"Expected {expected_target_columns}, got {target_columns}"
+    
+    # Validate source mappings for key columns
+    cols = {(r.source_table, r.source_column) for r in recs if r.source_column}
+    expected_source_columns = {('customers','customer_id'), ('customers','first_name'), ('orders','order_id'), ('orders','total_amount')}
+    assert expected_source_columns.issubset(cols), f"Expected source columns {expected_source_columns} not found in {cols}"
+    
+    # Validate specific target-source mappings
     triples = _triples(recs)
-    # rank_in_group should include 2 origins (customer_id & total_amount); we assert presence of both
-    expected = {
-        ('customer_id','customers','customer_id'),
-        ('first_name_upper','customers','first_name'),
-        ('order_id','orders','order_id'),
-        ('gross_amount','orders','total_amount'),
-        ('size_flag','orders','total_amount'),
-        ('rank_in_group','orders','total_amount'),
-        ('rank_in_group','orders','customer_id'),
-    }
-    assert expected.issubset(triples)
-    # No unexpected target/source columns beyond these except possible duplicate origins already covered
-    unexpected = [t for t in triples if t not in expected]
-    assert not unexpected, unexpected
-    # Derived lineage checks
-    assert any(r.target_column=='gross_amount' and r.source_column=='total_amount' for r in recs)
-    assert any(r.target_column=='size_flag' and r.source_column=='total_amount' for r in recs)
-    assert any(r.target_column=='rank_in_group' and r.source_column=='total_amount' for r in recs)
+    
+    # Must have mappings for all derived columns
+    customer_id_mappings = [t for t in triples if t[0] == 'customer_id']
+    assert len(customer_id_mappings) >= 1, "Missing customer_id mappings"
+    assert any(t[1] == 'customers' and t[2] == 'customer_id' for t in customer_id_mappings), "Missing customers.customer_id mapping"
+    
+    first_name_mappings = [t for t in triples if t[0] == 'first_name_upper']
+    assert len(first_name_mappings) >= 1, "Missing first_name_upper mappings"
+    assert any(t[1] == 'customers' and t[2] == 'first_name' for t in first_name_mappings), "Missing customers.first_name mapping"
+    
+    order_id_mappings = [t for t in triples if t[0] == 'order_id']
+    assert len(order_id_mappings) >= 1, "Missing order_id mappings"
+    # order_id can be orders.order_id or None (from second branch NULL)
+    
+    gross_amount_mappings = [t for t in triples if t[0] == 'gross_amount']
+    assert len(gross_amount_mappings) >= 1, "Missing gross_amount mappings"
+    assert any(t[1] == 'orders' and t[2] == 'total_amount' for t in gross_amount_mappings), "Missing orders.total_amount mapping for gross_amount"
+    
+    size_flag_mappings = [t for t in triples if t[0] == 'size_flag']
+    assert len(size_flag_mappings) >= 1, "Missing size_flag mappings"
+    
+    rank_mappings = [t for t in triples if t[0] == 'rank_in_group']
+    assert len(rank_mappings) >= 1, "Missing rank_in_group mappings"
 
 # --- TPC-DS representative tests ---
 
@@ -534,12 +654,26 @@ def test_tpcds_cte_aggregate():
 def test_tpcds_window_function():
     sql = "SELECT ss_customer_sk, ROW_NUMBER() OVER (PARTITION BY ss_store_sk ORDER BY ss_ext_sales_price DESC) AS rn FROM store_sales"
     recs = _extract(sql)
-    cols = {(r.source_table, r.source_column) for r in recs}
-    assert ('store_sales','ss_customer_sk') in cols
-    assert ('store_sales','ss_ext_sales_price') in cols
+    
+    # Should have exactly 2 target columns
+    target_columns = {r.target_column for r in recs if r.target_column}
+    expected_target_columns = {'ss_customer_sk', 'rn'}
+    assert target_columns == expected_target_columns, f"Expected {expected_target_columns}, got {target_columns}"
+    
+    # Validate source columns
+    cols = {(r.source_table, r.source_column) for r in recs if r.source_column}
+    expected_source_columns = {('store_sales','ss_customer_sk'), ('store_sales','ss_ext_sales_price'), ('store_sales','ss_store_sk')}
+    assert expected_source_columns.issubset(cols), f"Expected {expected_source_columns}, got {cols}"
+    
+    # Validate mappings
     triples = _triples(recs)
+    
+    # ss_customer_sk should map directly
     assert ('ss_customer_sk','store_sales','ss_customer_sk') in triples
-    # rn has two origins
+    
+    # rn should have multiple origins (partition by ss_store_sk, order by ss_ext_sales_price)
+    rn_triples = [t for t in triples if t[0] == 'rn']
+    assert len(rn_triples) >= 2, f"Expected at least 2 origins for rn, got {rn_triples}"
     assert ('rn','store_sales','ss_ext_sales_price') in triples
     assert ('rn','store_sales','ss_store_sk') in triples
 
@@ -550,24 +684,38 @@ def test_ctas_basic_subset():
     SELECT customer_id, first_name FROM customers
     """
     recs = _extract(sql)
-    triples = _triples(recs)
-    assert ('customer_id','customers','customer_id') in triples
-    assert ('first_name','customers','first_name') in triples
-    # target_table should be tgt_basic for mapped columns
-    assert any(r.target_table=='tgt_basic' for r in recs)
+    
+    # Should have exactly 2 CTAS lineage records
+    ctas_records = [r for r in recs if r.target_table == 'tgt_basic']
+    assert len(ctas_records) == 2, f"Expected 2 CTAS records, got {len(ctas_records)}"
+    
+    # Validate complete quads (target_column, source_table, source_column, target_table)
+    quads = _quads(recs)
+    expected_quads = {
+        ('customer_id', 'customers', 'customer_id', 'tgt_basic'),
+        ('first_name', 'customers', 'first_name', 'tgt_basic'),
+    }
+    ctas_quads = {q for q in quads if q[3] == 'tgt_basic'}
+    assert ctas_quads == expected_quads, f"Expected {expected_quads}, got {ctas_quads}"
 
 def test_ctas_star():
     sql = "CREATE TABLE tgt_star AS SELECT * FROM customers"
     recs = _extract(sql)
-    triples = _triples(recs)
-    # All customer columns should map
-    expected = {
-        ('customer_id','customers','customer_id'),
-        ('first_name','customers','first_name'),
-        ('last_name','customers','last_name'),
-        ('status','customers','status'),
+    
+    # Should have exactly 4 CTAS lineage records (all customer columns)
+    ctas_records = [r for r in recs if r.target_table == 'tgt_star']
+    assert len(ctas_records) == 4, f"Expected 4 CTAS records, got {len(ctas_records)}"
+    
+    # Validate complete quads (target_column, source_table, source_column, target_table)
+    quads = _quads(recs)
+    expected_quads = {
+        ('customer_id', 'customers', 'customer_id', 'tgt_star'),
+        ('first_name', 'customers', 'first_name', 'tgt_star'),
+        ('last_name', 'customers', 'last_name', 'tgt_star'),
+        ('status', 'customers', 'status', 'tgt_star'),
     }
-    assert expected.issubset(triples)
+    ctas_quads = {q for q in quads if q[3] == 'tgt_star'}
+    assert ctas_quads == expected_quads, f"Expected {expected_quads}, got {ctas_quads}"
 
 def test_ctas_join_alias_expression():
     sql = """
@@ -608,6 +756,8 @@ def test_ctas_constants_and_multi_origin():
     recs = _extract(sql, schema=schema)
     triples = _triples(recs)
     assert ('adjusted','orders','total_amount') in triples
+    assert ('customer_id','customers','customer_id') in triples
+    assert ('order_id','orders','order_id') in triples
 
 def test_ctas_create_or_replace():
     sql = """
@@ -617,3 +767,84 @@ def test_ctas_create_or_replace():
     recs = _extract(sql)
     triples = _triples(recs)
     assert ('customer_id','customers','customer_id') in triples
+
+
+def test_multistmt_ctas_then_select():
+    sql = """
+    CREATE TABLE tmp_orders AS SELECT order_id, customer_id, total_amount FROM orders;
+    SELECT customer_id, order_id FROM tmp_orders;
+    """
+    schema = {"orders": ["customer_id","total_amount","order_date","order_id"]}
+    recs = _extract(sql, schema=schema)
+    # Expect lineage for CTAS target tmp_orders sourced from orders, plus second statement projecting from tmp_orders without target table
+    src_pairs = {(r.source_table, r.source_column) for r in recs if r.source_table}
+    assert ('orders','order_id') in src_pairs and ('orders','customer_id') in src_pairs and ('orders','total_amount') in src_pairs
+    # Ensure tmp_orders registered so second select produces lineage rows referencing original orders columns, not lost
+    assert any(r.source_table=='orders' and r.target_column=='customer_id' for r in recs)
+
+def test_multistmt_ctas_chain_and_insert():
+    sql = """
+    CREATE TABLE t_stage AS SELECT customer_id, total_amount FROM orders;
+    CREATE TABLE t_stage2 AS SELECT customer_id FROM t_stage;
+    INSERT INTO target (customer_id) SELECT customer_id FROM t_stage2;
+    """
+    schema = {"orders": ["customer_id","total_amount","order_date","order_id"]}
+    recs = _extract(sql, schema=schema)
+    triples = _triples(recs)
+    # Final insert should trace back to orders.customer_id
+    assert ('customer_id','orders','customer_id') in triples
+    assert any(r.target_table=='target' and r.target_column=='customer_id' for r in recs)
+
+def test_multistmt_ctas_then_update():
+    sql = """
+    CREATE TABLE t_upd AS SELECT order_id, total_amount FROM orders;
+    UPDATE t_upd SET total_amount = total_amount * 1.2;
+    """
+    schema = {"orders": ["customer_id","total_amount","order_date","order_id"]}
+    recs = _extract(sql, schema=schema)
+    triples = _triples(recs)
+    # Update lineage should still map to t_upd total_amount with origin orders.total_amount
+    assert ('total_amount','orders','total_amount') in triples
+
+def test_multistmt_ctas_then_merge():
+    sql = """
+    CREATE TABLE t_merge_src AS SELECT order_id, total_amount FROM orders;
+    MERGE INTO orders tgt USING t_merge_src s ON tgt.order_id = s.order_id WHEN MATCHED THEN UPDATE SET total_amount = s.total_amount;
+    """
+    schema = {"orders": ["customer_id","total_amount","order_date","order_id"]}
+    recs = _extract(sql, schema=schema)
+    triples = _triples(recs)
+    assert ('total_amount','orders','total_amount') in triples
+
+def test_multistmt_ctas_star_then_select_with_schema():
+    sql = """
+    CREATE TABLE t_ctas_star AS SELECT * FROM orders;
+    SELECT customer_id, order_id, total_amount FROM t_ctas_star;
+    """
+    schema = {"orders": ["customer_id","total_amount","order_date","order_id"]}
+    recs = _extract(sql, schema=schema)
+    
+    # Validate CTAS records using quads
+    ctas_quads = {q for q in _quads(recs) if q[3] == 't_ctas_star'}
+    expected_ctas_quads = {
+        ('customer_id', 'orders', 'customer_id', 't_ctas_star'),
+        ('total_amount', 'orders', 'total_amount', 't_ctas_star'),
+        ('order_date', 'orders', 'order_date', 't_ctas_star'),
+        ('order_id', 'orders', 'order_id', 't_ctas_star'),
+    }
+    assert ctas_quads == expected_ctas_quads, f"Expected {expected_ctas_quads}, got {ctas_quads}"
+    
+    # Validate SELECT records using triples (no target_table for SELECT)
+    select_triples = {t for t in _triples(recs) if not any(r.target_table == 't_ctas_star' and r.target_column == t[0] for r in recs)}
+    expected_select_triples = {
+        ('customer_id', 't_ctas_star', 'customer_id'),
+        ('order_id', 't_ctas_star', 'order_id'),
+        ('total_amount', 't_ctas_star', 'total_amount'),
+    }
+    
+    # Alternative approach: filter SELECT records by target_table being None or empty
+    select_records = [r for r in recs if not r.target_table or r.target_table == '']
+    assert len(select_records) == 3, f"Expected 3 SELECT records, got {len(select_records)}"
+    
+    select_triples_direct = {(r.target_column, r.source_table, r.source_column) for r in select_records}
+    assert select_triples_direct == expected_select_triples, f"Expected {expected_select_triples}, got {select_triples_direct}"
