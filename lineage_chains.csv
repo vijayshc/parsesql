@@ -1,0 +1,11 @@
+source_table,source_column,target_table,target_column,ultimate_source_table,ultimate_source_column,ultimate_target_table,ultimate_target_column,level_top_to_bottom,level_bottom_to_top
+customers,first_name,test1,first_name,customers,first_name,test1,first_name,1,1
+customers,last_name,test1,last_name,customers,last_name,test1,last_name,1,1
+customers,status,test1,status,customers,status,test1,status,1,1
+customers,customer_id,test1,customer_id,customers,customer_id,,customer_id,1,2
+test1,customer_id,,customer_id,customers,customer_id,,customer_id,2,1
+customers,customer_id,,customer_id,customers,customer_id,,customer_id,1,1
+customers,first_name,,first_name,customers,first_name,,first_name,1,1
+customers,last_name,,last_name,customers,last_name,,last_name,1,1
+customers,status,,status,customers,status,,status,1,1
+customers,first_name,,first_name_upper,customers,first_name,,first_name_upper,1,1
