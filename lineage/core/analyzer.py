@@ -42,12 +42,41 @@ class SelectAnalyzer:
 
     def analyze(self) -> List[ExpressionLineage]:
         if isinstance(self.select, exp.Union):
-            # Merge branch outputs; treat each branch individually but we don't know output ordering if different.
-            out: List[ExpressionLineage] = []
-            for part in self._select_parts(self.select):
+            # Handle UNION semantics: column names from first SELECT, data from all branches by position
+            parts = self._select_parts(self.select)
+            if not parts:
+                return []
+            
+            # Analyze each branch
+            branch_lineages = []
+            for part in parts:
                 sa = SelectAnalyzer(part, self.env, self.schema, self.dialect)
-                out.extend(sa.analyze())
-            return out
+                branch_lineages.append(sa.analyze())
+            
+            if not branch_lineages:
+                return []
+            
+            # Merge by position: column names from first branch, origins from all branches
+            first_branch = branch_lineages[0]
+            merged_lineages = []
+            
+            for i, first_el in enumerate(first_branch):
+                # Start with the first branch's lineage
+                merged_el = ExpressionLineage(
+                    expression_sql=first_el.expression_sql,
+                    output_column=first_el.output_column,
+                    origins=list(first_el.origins)
+                )
+                
+                # Add origins from corresponding positions in other branches
+                for branch in branch_lineages[1:]:
+                    if i < len(branch):
+                        branch_el = branch[i]
+                        merged_el.origins.extend(branch_el.origins)
+                
+                merged_lineages.append(merged_el)
+            
+            return merged_lineages
         if not isinstance(self.select, exp.Select):
             return []
         sources = self._build_sources(self.select)
@@ -202,6 +231,7 @@ class SelectAnalyzer:
 
     def _expand_unqualified_star(self, sources: List[Tuple[str, SourceBase]], proj: exp.Star | exp.Expression) -> List[ExpressionLineage]:
         origins: List[ExpressionLineage] = []
+        seen_columns = set()  # Track columns we've already seen to avoid duplicates
         # For * we enumerate every column from each source in order
         for alias, src in sources:
             for col in src.output_columns():
@@ -217,6 +247,10 @@ class SelectAnalyzer:
                         origins=(ColumnOrigin(table=table_name, column='*', expression_chain='*'),)
                     ))
                     continue
+                # Skip columns we've already seen (first occurrence wins)
+                if col_name in seen_columns:
+                    continue
+                seen_columns.add(col_name)
                 col_origins = src.resolve_column(col_name)
                 # Create one lineage entry with all origins for this column
                 if col_origins:

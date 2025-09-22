@@ -10,6 +10,8 @@ test1,customer_id,customer_id,customer_id,,sql/test.sql
 ,last_name,last_name,last_name,test,sql/test_ctas_with.sql
 customer_good,customer_id,customer_id~a.customer_id~customer_id~a.customer_id,customer_id,test,sql/test_ctas_with.sql
 customer_bad,customer_id,customer_id~a.customer_id~customer_id~a.customer_id,customer_id,test,sql/test_ctas_with.sql
+test1,test,test,test,test,sql/test_ctas_with.sql
+test2,test1,test1~test,test,test,sql/test_ctas_with.sql
 customers,customer_id,customer_id~c1.customer_id~c2.customer_id~c4.customer_id,customer_id,,sql/test_cte_alias_chain_prune.sql
 customers,customer_id,customer_id,customer_id,,sql/test_cte_complex.sql
 customers,first_name,first_name,first_name,,sql/test_cte_complex.sql
@@ -22,7 +24,6 @@ orders,order_id,order_id~o.order_id,order_id,,sql/test_cte_join_star.sql
 orders,customer_id,customer_id~o.customer_id,customer_id,,sql/test_cte_join_star.sql
 customers,first_name,first_name~c.first_name,first_name,,sql/test_cte_join_star.sql
 customers,customer_id,customer_id~j.customer_id~s_customer_id,customer_id,,sql/test_cte_join_star_prune.sql
-orders,customer_id,customer_id~j.customer_id~s_customer_id,customer_id,,sql/test_cte_join_star_prune.sql
 customers,customer_id,customer_id,customer_id,,sql/test_cte_mixed_star_explicit.sql
 customers,first_name,first_name,first_name,,sql/test_cte_mixed_star_explicit.sql
 customers,customer_id,customer_id,customer_id,,sql/test_cte_nested_subquery.sql

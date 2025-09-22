@@ -104,23 +104,15 @@ class SelectSource(SourceBase):
             elif not out_name and el.expression_sql in ('*',) and el.origins:
                 for o in el.origins:
                     if o.column and o.column != '*':
-                        outputs.append(o.column)
-                        if o.column not in idx:
-                            # For star expansion, preserve existing expression chains
+                        if o.column not in outputs:  # First occurrence wins for star expansion
+                            outputs.append(o.column)
                             idx[o.column] = [o]
-                        else:
-                            # Accumulate origins for the same column
-                            idx[o.column].append(o)
             # For unnamed direct column expressions (e.g., table.col) add the column name
             elif not out_name and el.expression_sql and '.' in el.expression_sql and len(el.origins) == 1:
                 origin = el.origins[0]
                 if origin.column and origin.column not in outputs:
                     outputs.append(origin.column)
-                    # Accumulate origins for the same column
-                    if origin.column not in idx:
-                        idx[origin.column] = [origin]
-                    else:
-                        idx[origin.column].append(origin)
+                    idx[origin.column] = [origin]
         
         # If no outputs were generated, create a synthetic column for star expansion fallback
         if not outputs and expr_lineages:
