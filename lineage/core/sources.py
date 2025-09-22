@@ -143,46 +143,8 @@ class SelectSource(SourceBase):
         if result:
             return result
         
-        # Fallback: only for specific cases where CTE might be incomplete
-        # This should be conservative to avoid breaking existing behavior
-        if not hasattr(self, '_resolving_fallback'):
-            try:
-                self._resolving_fallback = True
-                from .analyzer import SelectAnalyzer
-                analyzer = SelectAnalyzer(self.select, self.env, self.schema)
-                sources = analyzer._build_sources(self.select)
-                
-                # Only apply fallback if:
-                # 1. The CTE has a small number of output columns (suggesting it might be incomplete)
-                # 2. There are underlying sources that have the requested column
-                # 3. At least one underlying source is in the schema (to avoid too aggressive resolution)
-                
-                if len(self.output_columns()) <= 3:  # Conservative: only for CTEs with few columns
-                    schema_sources = []
-                    unknown_sources = []
-                    
-                    for alias, src in sources:
-                        if hasattr(src, 'resolve_column') and src != self:
-                            underlying_result = src.resolve_column(name)
-                            if underlying_result:
-                                # Check if this source's table is in schema
-                                if hasattr(src, 'table_name') and self.schema.columns(src.table_name):
-                                    schema_sources.extend(underlying_result)
-                                else:
-                                    unknown_sources.extend(underlying_result)
-                    
-                    # Prefer schema-based sources over unknown sources
-                    if schema_sources:
-                        return schema_sources
-                    elif len(unknown_sources) == 1:  # Only if there's exactly one unknown source
-                        return unknown_sources
-                        
-            except Exception:
-                # If anything fails in fallback resolution, return empty
-                pass
-            finally:
-                delattr(self, '_resolving_fallback')
-        
+        # CTE/Subquery should ONLY expose explicitly selected columns
+        # No fallback to underlying sources - this violates SQL scope rules
         return []
 
 

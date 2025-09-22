@@ -375,45 +375,47 @@ class SelectAnalyzer:
             if name.startswith(pref) and any(t.endswith(table) or t == table for t in candidate_tables):
                 # Accept prefix inference only if table participates in sources
                 return [ColumnOrigin(table=table, column=name, expression_chain=name)]
-        # Fallback: Check sources in priority order (SelectSource first, then TableSource)
-        select_source_results: List[ColumnOrigin] = []
-        table_source_results: List[ColumnOrigin] = []
+        # Fallback: Check all sources and resolve conflicts properly
+        all_results: List[ColumnOrigin] = []
         
         for a, src in sources:
             r = src.resolve_column(name)
             if r:
-                if isinstance(src, SelectSource):
-                    select_source_results.extend(r)
-                elif isinstance(src, TableSource):
-                    table_source_results.extend(r)
+                all_results.extend(r)
         
-        # Priority 1: SelectSource results (CTEs, subqueries)
-        if select_source_results:
-            return select_source_results
+        if not all_results:
+            return [ColumnOrigin(table=None, column=name, expression_chain=name)]
         
-        # Priority 2: TableSource results with schema validation
-        if table_source_results:
-            schema_based_results = [o for o in table_source_results if o.table and self.schema.columns(o.table)]
-            unknown_table_results = [o for o in table_source_results if not (o.table and self.schema.columns(o.table))]
-            
-            # Use schema-based results if available
-            if schema_based_results:
-                unique_tables = set(o.table for o in schema_based_results)
-                if len(unique_tables) == 1:
-                    return schema_based_results
-                else:
-                    # Multiple tables in schema have this column - ambiguity
-                    return schema_based_results
-            
-            # Handle unknown tables
-            if unknown_table_results:
-                unique_tables = set(o.table for o in unknown_table_results)
-                if len(unique_tables) == 1:
-                    # Only one table (not in schema) - attribute to it
-                    return unknown_table_results
-                else:
-                    # Multiple tables, no schema info - cannot resolve
-                    return [ColumnOrigin(table=None, column=name, expression_chain=name)]
+        # Filter results to remove None/None placeholders if we have concrete results
+        concrete_results = [o for o in all_results if o.table or o.column]
+        if concrete_results:
+            all_results = concrete_results
         
-        # No results found
-        return [ColumnOrigin(table=None, column=name, expression_chain=name)]
+        # For proper scope resolution:
+        # 1. If multiple sources have the column, prefer schema-validated tables
+        # 2. Among schema-validated tables, if only one table has the column, use it
+        # 3. If multiple tables have the column, it's ambiguous - return all
+        # 4. If no schema validation, return all results
+        
+        schema_based_results = [o for o in all_results if o.table and self.schema.columns(o.table)]
+        
+        if schema_based_results:
+            # Use schema to disambiguate
+            unique_tables = set(o.table for o in schema_based_results)
+            if len(unique_tables) == 1:
+                # Only one table in schema has this column
+                return schema_based_results
+            else:
+                # Multiple tables have this column - ambiguous but valid
+                return schema_based_results
+        else:
+            # No schema validation available - return what we have
+            # Remove duplicates
+            seen = set()
+            dedup_results = []
+            for o in all_results:
+                key = (o.table, o.column)
+                if key not in seen:
+                    seen.add(key)
+                    dedup_results.append(o)
+            return dedup_results
