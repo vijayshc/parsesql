@@ -527,8 +527,8 @@ class SelectAnalyzer:
                         sources_definitely_not_having_column.append((alias, src))
             
             # Apply process of elimination
-            if len(sources_claiming_column) > 1:
-                # Multiple sources claim to have the column
+            if len(sources_claiming_column) >= 1:
+                # One or more sources claim to have the column
                 # Filter out sources that we know definitely don't have it
                 remaining_sources = []
                 for alias, src, result in sources_claiming_column:
@@ -539,12 +539,17 @@ class SelectAnalyzer:
                 if len(remaining_sources) == 1:
                     _, _, result = remaining_sources[0]
                     return result
-                elif len(remaining_sources) == 0:
+                elif len(remaining_sources) > 1:
+                    # Multiple sources remain - collect their results
+                    all_results = []
+                    for _, _, result in remaining_sources:
+                        all_results.extend(result)
+                    return all_results if all_results else [ColumnOrigin(table=None, column=name, expression_chain=name)]
+                else:
                     # All sources were eliminated - shouldn't happen, but be safe
                     return [ColumnOrigin(table=None, column=name, expression_chain=name)]
             
-            # Fallback: For unknown JOIN sources, be very conservative
-            # Only return results if there's high confidence about the column
+            # If no sources claim to have the column, fall back to conservative approach
             return [ColumnOrigin(table=None, column=name, expression_chain=name)]
         else:
             return [ColumnOrigin(table=None, column=name, expression_chain=name)]
