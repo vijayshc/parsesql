@@ -206,8 +206,16 @@ class SelectAnalyzer:
         for alias, src in sources:
             for col in src.output_columns():
                 col_name = _norm(col)
-                # Skip placeholder '*' from sources with unknown schema
+                # Handle placeholder '*' from sources with unknown schema
                 if col_name == '*':
+                    # Create a special lineage entry for unknown star expansion
+                    # This will allow SelectSource to detect and infer from it later
+                    table_name = getattr(src, 'table_name', None)
+                    origins.append(ExpressionLineage(
+                        expression_sql='*', 
+                        output_column=None,  # No specific output column
+                        origins=(ColumnOrigin(table=table_name, column='*', expression_chain='*'),)
+                    ))
                     continue
                 col_origins = src.resolve_column(col_name)
                 # Create one lineage entry with all origins for this column

@@ -143,9 +143,45 @@ class SelectSource(SourceBase):
         if result:
             return result
         
+        # Inference for * expansion when schema is not available
+        # If this SelectSource contains a * but couldn't resolve it due to missing schema,
+        # we can infer that requested columns might come from that *
+        if self._has_star_expansion():
+            star_sources = self._get_star_sources()
+            if star_sources:
+                # Infer that the requested column comes from the star expansion
+                return [ColumnOrigin(table=star_sources[0], column=name, expression_chain=name)]
+        
         # CTE/Subquery should ONLY expose explicitly selected columns
         # No fallback to underlying sources - this violates SQL scope rules
         return []
+    
+    def _has_star_expansion(self) -> bool:
+        """Check if this SelectSource has a * expansion that couldn't be resolved."""
+        # Re-analyze to get the raw lineages
+        from .analyzer import SelectAnalyzer
+        analyzer = SelectAnalyzer(self.select, self.env, self.schema)
+        expr_lineages = analyzer.analyze()
+        
+        # Look for * expressions that didn't generate output columns
+        for el in expr_lineages:
+            if el.expression_sql == '*' and not el.output_column:
+                return True
+        return False
+    
+    def _get_star_sources(self) -> List[str]:
+        """Get table names from * expansion origins."""
+        from .analyzer import SelectAnalyzer
+        analyzer = SelectAnalyzer(self.select, self.env, self.schema)
+        expr_lineages = analyzer.analyze()
+        
+        tables = []
+        for el in expr_lineages:
+            if el.expression_sql == '*':
+                for origin in el.origins:
+                    if origin.table and origin.table not in tables:
+                        tables.append(origin.table)
+        return tables
 
 
 @dataclass

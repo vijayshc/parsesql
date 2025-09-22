@@ -1,10 +1,11 @@
+create table test as
 with cte as (
-    select 'test',concat(first_name1, ' ', last_name2) as test from 
-    (
-        select * from customers1
-    ) t1
+    select sno, entity_name from (select * from table1) t1
 )
-select 'test', test,first_name,last_name from cte
-inner join (select first_name,last_name from customers2) t2 
-on 1=2
-;
+select distinct
+t1.sno, t1.entity_name, entitity 
+from cte t1
+inner join (
+    select entitity from table2
+) t2
+on 1=2;

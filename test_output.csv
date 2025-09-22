@@ -6,10 +6,9 @@ customers,status,status,status,test1,sql/test.sql
 test1,customer_id,customer_id,customer_id,,sql/test.sql
 ,,order_id,order_id,,sql/test.sql
 ,,total_amount * 1.1,adjusted,,sql/test.sql
-,,'test',,,sql/test_ctas_with.sql
-,,test,test,,sql/test_ctas_with.sql
-customers2,first_name,first_name,first_name,,sql/test_ctas_with.sql
-customers2,last_name,last_name,last_name,,sql/test_ctas_with.sql
+table1,sno,sno~t1.sno,sno,test,sql/test_ctas_with.sql
+table1,entity_name,entity_name~t1.entity_name,entity_name,test,sql/test_ctas_with.sql
+table2,entitity,entitity,entitity,test,sql/test_ctas_with.sql
 customers,customer_id,customer_id~c1.customer_id~c2.customer_id~c4.customer_id,customer_id,,sql/test_cte_alias_chain_prune.sql
 customers,customer_id,customer_id,customer_id,,sql/test_cte_complex.sql
 customers,first_name,first_name,first_name,,sql/test_cte_complex.sql
