@@ -383,47 +383,79 @@ class SelectAnalyzer:
             if name.startswith(pref) and any(t.endswith(table) or t == table for t in candidate_tables):
                 # Accept prefix inference only if table participates in sources
                 return [ColumnOrigin(table=table, column=name, expression_chain=name)]
-        # Fallback: Check all sources and resolve conflicts properly
-        all_results: List[ColumnOrigin] = []
+        # Enhanced scope-aware resolution with explicit column priority
+        # Priority order:
+        # 1. Explicit column definitions (subqueries that specifically select the column)
+        # 2. FROM clause (main source)
+        # 3. JOIN sources with schema-defined columns  
+        # 4. JOIN sources without schema (less certain)
         
-        for a, src in sources:
+        explicit_results: List[ColumnOrigin] = []
+        from_source_results: List[ColumnOrigin] = []
+        schema_join_results: List[ColumnOrigin] = []
+        unknown_join_results: List[ColumnOrigin] = []
+        
+        for i, (alias, src) in enumerate(sources):
             r = src.resolve_column(name)
             if r:
-                all_results.extend(r)
+                # Check if this source explicitly defines the column
+                if self._source_explicitly_defines_column(src, name):
+                    explicit_results.extend(r)
+                elif i == 0:  # First source is the FROM clause
+                    from_source_results.extend(r)
+                else:  # JOIN sources
+                    # Check if this is a schema-validated source
+                    if isinstance(src, TableSource) and src.schema.columns(src.table_name):
+                        schema_join_results.extend(r)
+                    else:
+                        unknown_join_results.extend(r)
         
-        if not all_results:
-            return [ColumnOrigin(table=None, column=name, expression_chain=name)]
+        # Apply priority resolution:
+        # 1. If explicit sources exist, use them (most specific)
+        # 2. Else if FROM source has it, use FROM
+        # 3. Else if schema-validated JOINs have it, use them
+        # 4. Else use unknown JOIN sources
         
-        # Filter results to remove None/None placeholders if we have concrete results
-        concrete_results = [o for o in all_results if o.table or o.column]
-        if concrete_results:
-            all_results = concrete_results
-        
-        # For proper scope resolution:
-        # 1. If multiple sources have the column, prefer schema-validated tables
-        # 2. Among schema-validated tables, if only one table has the column, use it
-        # 3. If multiple tables have the column, it's ambiguous - return all
-        # 4. If no schema validation, return all results
-        
-        schema_based_results = [o for o in all_results if o.table and self.schema.columns(o.table)]
-        
-        if schema_based_results:
-            # Use schema to disambiguate
-            unique_tables = set(o.table for o in schema_based_results)
-            if len(unique_tables) == 1:
-                # Only one table in schema has this column
-                return schema_based_results
-            else:
-                # Multiple tables have this column - ambiguous but valid
-                return schema_based_results
+        if explicit_results:
+            concrete = [o for o in explicit_results if o.table or o.column]
+            return concrete if concrete else explicit_results
+        elif from_source_results:
+            concrete = [o for o in from_source_results if o.table or o.column]
+            return concrete if concrete else from_source_results
+        elif schema_join_results:
+            concrete = [o for o in schema_join_results if o.table or o.column]
+            return concrete if concrete else schema_join_results
+        elif unknown_join_results:
+            concrete = [o for o in unknown_join_results if o.table or o.column]
+            return concrete if concrete else unknown_join_results
         else:
-            # No schema validation available - return what we have
-            # Remove duplicates
-            seen = set()
-            dedup_results = []
-            for o in all_results:
-                key = (o.table, o.column)
-                if key not in seen:
-                    seen.add(key)
-                    dedup_results.append(o)
-            return dedup_results
+            return [ColumnOrigin(table=None, column=name, expression_chain=name)]
+    
+    def _source_explicitly_defines_column(self, src: SourceBase, column_name: str) -> bool:
+        """Check if a source explicitly defines a column (vs having it implicitly available)."""
+        if isinstance(src, SelectSource):
+            # For SelectSource, check if the column is in the explicit output
+            output_cols = src.output_columns()
+            normalized_name = _norm(column_name)
+            
+            # If the column is explicitly in output, it's explicit
+            if any(_norm(col) == normalized_name for col in output_cols):
+                return True
+                
+            # Check if this SelectSource was created from a query that explicitly selects this column
+            # This requires analyzing the SELECT expressions  
+            analyzer = SelectAnalyzer(src.select, src.env, src.schema)
+            lineages = analyzer.analyze()
+            
+            for el in lineages:
+                if el.output_column and _norm(el.output_column) == normalized_name:
+                    # This column was explicitly selected (not from *)
+                    if el.expression_sql != '*':
+                        return True
+            
+        elif isinstance(src, TableSource):
+            # For TableSource, all columns are equally explicit/implicit based on schema
+            # We consider schema-defined columns as "explicit" and unknown columns as "implicit"
+            return bool(src.schema.columns(src.table_name))
+        
+        return False

@@ -3,9 +3,10 @@ with cte as (
     select sno, entity_name from (select * from table1) t1
 )
 select distinct
-t1.sno, t1.entity_name, entitity 
+sno, entity_name, entitity 
 from cte t1
-inner join (
-    select entitity from table2
-) t2
-on 1=2;
+left outer join table2 t2
+on 1=2
+left outer join table3  t3
+on 1=2
+left outer join (select entitity from table4) t4;

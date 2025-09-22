@@ -1,8 +1,6 @@
 {
   "orders": ["customer_id", "total_amount", "order_date", "order_id"],
   "customers": ["customer_id", "first_name", "last_name", "status"],
-  "customers1": ["first_name1", "last_name2"],
-  "customers2": ["first_name", "last_name"],
   "x": ["a"],
   "y": ["a", "b", "c", "uid"],
   "z": ["a", "uid"],

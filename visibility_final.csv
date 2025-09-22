@@ -1,0 +1,17 @@
+source_table,source_column,expression,target_column,target_table,file
+customers1,first_name1,first_name1,first_name1,,visibility_tests/test1_subquery_star.sql
+customers1,last_name2,last_name2,last_name2,,visibility_tests/test1_subquery_star.sql
+customers1,first_name1,first_name1,first_name1,,visibility_tests/test2_cte_star.sql
+customers1,last_name2,last_name2,last_name2,,visibility_tests/test2_cte_star.sql
+customers1,first_name1,first_name1,first_name1,,visibility_tests/test3_subquery_explicit.sql
+customers1,last_name2,last_name2,last_name2,,visibility_tests/test3_subquery_explicit.sql
+,,first_name1,first_name1,,visibility_tests/test4_nested_star.sql
+,,last_name2,last_name2,,visibility_tests/test4_nested_star.sql
+unknown_table,x,x~a,a,,visibility_tests/test5_explicit_no_schema.sql
+unknown_table,y,y~b,b,,visibility_tests/test5_explicit_no_schema.sql
+unknown_table,col1,col1,col1,,visibility_tests/test6_cte_explicit_no_schema.sql
+unknown_table,col2,col2,col2,,visibility_tests/test6_cte_explicit_no_schema.sql
+unknown_table,x,x~a~final_a,final_a,,visibility_tests/test7_nested_explicit_no_schema.sql
+unknown_table,y,y~b~final_b,final_b,,visibility_tests/test7_nested_explicit_no_schema.sql
+unknown_table,col1,col1,col1,,visibility_tests/test8_star_no_schema.sql
+unknown_table,col2,col2,col2,,visibility_tests/test8_star_no_schema.sql
