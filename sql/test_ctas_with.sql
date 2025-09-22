@@ -10,6 +10,8 @@ with fmf_int as (
 ,msg_rank as (
     select t_message,col1 from fmf f 
     inner join table2 on 1=2
+    inner join table3 on 1=2
+    where col2 > 100
 )
 ,msg as (
     select t_message from msg_rank

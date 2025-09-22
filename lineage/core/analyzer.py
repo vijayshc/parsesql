@@ -539,14 +539,9 @@ class SelectAnalyzer:
                 if len(remaining_sources) == 1:
                     _, _, result = remaining_sources[0]
                     return result
-                elif len(remaining_sources) > 1:
-                    # Multiple sources remain - collect their results
-                    all_results = []
-                    for _, _, result in remaining_sources:
-                        all_results.extend(result)
-                    return all_results if all_results else [ColumnOrigin(table=None, column=name, expression_chain=name)]
                 else:
-                    # All sources were eliminated - shouldn't happen, but be safe
+                    # Multiple sources remain or none remain - be conservative
+                    # For JOINs with multiple unknown tables, we can't definitively determine the source
                     return [ColumnOrigin(table=None, column=name, expression_chain=name)]
             
             # If no sources claim to have the column, fall back to conservative approach
