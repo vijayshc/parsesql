@@ -136,7 +136,23 @@ class LineageExtractor:
                 this_arg = core_stmt.this
                 if isinstance(this_arg, exp.Table):
                     target_table = self._table_name(this_arg)
-                analyzer = SelectAnalyzer(expression, env, self.schema, self.engine)
+                
+                # Handle WITH clauses within the CTAS SELECT expression
+                ctas_env = env
+                if hasattr(expression, 'args') and expression.args.get('with'):
+                    # Create a new environment that includes CTEs from the SELECT expression
+                    ctas_env = AnalysisEnvironment(ctes=dict(env.ctes))
+                    with_obj = expression.args.get('with')
+                    for cte in with_obj.find_all(exp.CTE):
+                        name = _norm(str(cte.alias))
+                        if not name:
+                            continue
+                        inner = cte.this
+                        # Register only SELECT/UNION CTEs
+                        if isinstance(inner, (exp.Select, exp.Union)):
+                            ctas_env.register(name, SelectSource(inner, ctas_env, self.schema))
+                
+                analyzer = SelectAnalyzer(expression, ctas_env, self.schema, self.engine)
                 expr_lineages = analyzer.analyze()
                 rows: List[LineageRecord] = []
                 # If SELECT * and no origins resolved (placeholder), try to derive columns from underlying single table sources
