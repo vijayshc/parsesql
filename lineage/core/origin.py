@@ -9,9 +9,10 @@ class ColumnOrigin:
     """Represents a physical source table & column for lineage."""
     table: Optional[str]
     column: Optional[str]
+    expression_chain: Optional[str] = None  # Full expression path separated by ~
 
     def as_key(self) -> tuple:
-        return (self.table, self.column)
+        return (self.table, self.column, self.expression_chain)
 
 
 @dataclass(frozen=True)

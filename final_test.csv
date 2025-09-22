@@ -1,0 +1,39 @@
+source_table,source_column,expression,target_column,target_table,file
+customers,customer_id,customer_id,customer_id,test1,sql/test.sql
+customers,first_name,first_name,first_name,test1,sql/test.sql
+customers,last_name,last_name,last_name,test1,sql/test.sql
+customers,status,status,status,test1,sql/test.sql
+test1,customer_id,customer_id,customer_id,,sql/test.sql
+test1,order_id,order_id,order_id,,sql/test.sql
+test1,total_amount,total_amount~total_amount * 1.1,adjusted,,sql/test.sql
+base2,first_name,"first_name~CONCAT(first_name, last_name)",,,sql/test_ctas_with.sql
+base2,last_name,"last_name~CONCAT(first_name, last_name)",,,sql/test_ctas_with.sql
+customers,customer_id,customer_id~c1.customer_id~c1.customer_id~c2.customer_id~c2.customer_id~c3.*~c4.customer_id~c4.customer_id,customer_id,,sql/test_cte_alias_chain_prune.sql
+customers,customer_id,customer_id,customer_id,,sql/test_cte_complex.sql
+customers,first_name,first_name,first_name,,sql/test_cte_complex.sql
+customers,last_name,last_name,last_name,,sql/test_cte_complex.sql
+customers,status,status,status,,sql/test_cte_complex.sql
+orders,customer_id,customer_id~customer_id~customer_id~customer_id~customer_id~customer_id,customer_id,,sql/test_cte_expression_alias.sql
+orders,total_amount,total_amount~total_amount~total_amount * 0.1~total_amount * 0.1~tax~tax,tax,,sql/test_cte_expression_alias.sql
+orders,total_amount,total_amount~total_amount~total_amount + 5~total_amount + 5~adjusted~adjusted,adjusted,,sql/test_cte_expression_alias.sql
+orders,order_id,order_id~order_id~o.order_id~o.order_id,order_id,,sql/test_cte_join_star.sql
+orders,customer_id,customer_id~customer_id~o.customer_id~o.customer_id,customer_id,,sql/test_cte_join_star.sql
+customers,first_name,first_name~first_name~c.first_name~c.first_name,first_name,,sql/test_cte_join_star.sql
+customers,customer_id,customer_id~j.customer_id~j.customer_id~s_customer_id~s_customer_id,customer_id,,sql/test_cte_join_star_prune.sql
+customers,customer_id,customer_id~customer_id~customer_id~customer_id~customer_id,customer_id,,sql/test_cte_mixed_star_explicit.sql
+customers,first_name,first_name~first_name~first_name~first_name,first_name,,sql/test_cte_mixed_star_explicit.sql
+customers,customer_id,customer_id~customer_id~customer_id~customer_id,customer_id,,sql/test_cte_nested_subquery.sql
+customers,first_name,first_name~first_name~first_name~first_name,first_name,,sql/test_cte_nested_subquery.sql
+customers,customer_id,customer_id~customer_id~customer_id~customer_id,customer_id,,sql/test_cte_projection_prune.sql
+customers,first_name,first_name~first_name~first_name~first_name,first_name,,sql/test_cte_projection_prune.sql
+customers,customer_id,customer_id~customer_id,customer_id,,sql/test_cte_union_star.sql
+customers,first_name,first_name~first_name,first_name,,sql/test_cte_union_star.sql
+,,customer_id~customer_id,customer_id,orders,sql/test_new.sql
+,,order_id~order_id,order_id,orders,sql/test_new.sql
+customers,customer_id,customer_id~customer_id~c.customer_id,customer_id,,sql/test_plain_complex.sql
+customers,first_name,first_name~first_name~UPPER(c.first_name),first_name_upper,,sql/test_plain_complex.sql
+orders,order_id,order_id~order_id~o.order_id,order_id,,sql/test_plain_complex.sql
+orders,total_amount,total_amount~total_amount~o.total_amount * 1.1,gross_amount,,sql/test_plain_complex.sql
+orders,total_amount,total_amount~total_amount~CASE WHEN o.total_amount > 100 THEN 'LARGE' ELSE 'SMALL' END,size_flag,,sql/test_plain_complex.sql
+orders,customer_id,customer_id~ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY total_amount DESC)~ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY total_amount DESC)~t.rank_in_group,rank_in_group,,sql/test_plain_complex.sql
+orders,total_amount,total_amount~ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY total_amount DESC)~ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY total_amount DESC)~t.rank_in_group,rank_in_group,,sql/test_plain_complex.sql

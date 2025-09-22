@@ -31,7 +31,7 @@ class TableSource(SourceBase):
 
     def resolve_column(self, name: str) -> List[ColumnOrigin]:
         # Even if schema doesn't list the column we still attribute to table
-        return [ColumnOrigin(table=self.table_name, column=_norm(name))]
+        return [ColumnOrigin(table=self.table_name, column=_norm(name), expression_chain=_norm(name))]
 
 
 @dataclass
@@ -83,6 +83,7 @@ class SelectSource(SourceBase):
                 outputs.append(out_name)
                 # Only set lineage if not already present (first occurrence wins)
                 if out_name not in idx:
+                    # Preserve expression chains as-is from the analyzer
                     idx[out_name] = list(el.origins)
             # If expression is star expansion with origins but no output_column (due to star) add origin columns
             elif not out_name and el.expression_sql in ('*',) and el.origins:
@@ -90,12 +91,14 @@ class SelectSource(SourceBase):
                     if o.column and o.column != '*':
                         outputs.append(o.column)
                         if o.column not in idx:
+                            # For star expansion, preserve existing expression chains
                             idx[o.column] = [o]
             # For unnamed direct column expressions (e.g., table.col) add the column name
             elif not out_name and el.expression_sql and '.' in el.expression_sql and len(el.origins) == 1:
                 origin = el.origins[0]
                 if origin.column and origin.column not in outputs:
                     outputs.append(origin.column)
+                    # Preserve expression chains as-is from the analyzer
                     idx.setdefault(origin.column, []).append(origin)
         
         # If no outputs were generated, create a synthetic column for star expansion fallback

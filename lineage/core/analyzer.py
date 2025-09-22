@@ -71,7 +71,26 @@ class SelectAnalyzer:
             # If column expression with no resolved origins, attach placeholder
             if isinstance(expr, exp.Column) and not any(o.table or o.column for o in origins):
                 origins = [ColumnOrigin(table=None, column=None)]
-            lineages.append(ExpressionLineage(expression_sql=expr_sql(expr, self.dialect), output_column=out_col, origins=tuple(origins)))
+            
+            # Update expression chains to include current expression
+            current_expr_sql = expr_sql(expr, self.dialect)
+            enhanced_origins = []
+            for origin in origins:
+                # Build expression chain (source -> target flow)
+                if origin.expression_chain and current_expr_sql != origin.expression_chain:
+                    new_chain = f"{origin.expression_chain}~{current_expr_sql}"
+                elif current_expr_sql:
+                    new_chain = current_expr_sql
+                else:
+                    new_chain = origin.expression_chain
+                
+                enhanced_origins.append(ColumnOrigin(
+                    table=origin.table,
+                    column=origin.column,
+                    expression_chain=new_chain
+                ))
+            
+            lineages.append(ExpressionLineage(expression_sql=current_expr_sql, output_column=out_col, origins=tuple(enhanced_origins)))
         return lineages
 
     # ------- helpers ---------
@@ -339,7 +358,7 @@ class SelectAnalyzer:
                 candidate_tables.append(src.table_name)
         unique_hits = [t for t in candidate_tables if name in self.schema.columns(t)]
         if len(unique_hits) == 1:
-            return [ColumnOrigin(table=unique_hits[0], column=name)]
+            return [ColumnOrigin(table=unique_hits[0], column=name, expression_chain=name)]
         # Prefix-based inference (TPC-DS style)
         prefix_map = {
             'ss_': 'store_sales',
@@ -355,7 +374,7 @@ class SelectAnalyzer:
         for pref, table in sorted(prefix_map.items(), key=lambda x: -len(x[0])):
             if name.startswith(pref) and any(t.endswith(table) or t == table for t in candidate_tables):
                 # Accept prefix inference only if table participates in sources
-                return [ColumnOrigin(table=table, column=name)]
+                return [ColumnOrigin(table=table, column=name, expression_chain=name)]
         # Fallback: attribute to every source that reports the column
         results: List[ColumnOrigin] = []
         for a, src in sources:
@@ -381,4 +400,4 @@ class SelectAnalyzer:
                         break
                 if first:
                     results = [o for o in results if o.table == first]
-        return results or [ColumnOrigin(table=None, column=name)]
+        return results or [ColumnOrigin(table=None, column=name, expression_chain=name)]

@@ -183,7 +183,7 @@ class LineageExtractor:
                             LineageRecord(
                                 source_table=origin.table,
                                 source_column=origin.column,
-                                expression=el.expression_sql,
+                                expression=origin.expression_chain or el.expression_sql,
                                 target_column=tgt_col,
                                 target_table=target_table,
                                 file=file,
@@ -283,7 +283,7 @@ class LineageExtractor:
                     LineageRecord(
                         source_table=origin.table,
                         source_column=source_column,
-                        expression=el.expression_sql,
+                        expression=origin.expression_chain or el.expression_sql,
                         target_column=target_col,
                         target_table=target_table,
                         file=file,
