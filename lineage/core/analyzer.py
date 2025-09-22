@@ -375,29 +375,45 @@ class SelectAnalyzer:
             if name.startswith(pref) and any(t.endswith(table) or t == table for t in candidate_tables):
                 # Accept prefix inference only if table participates in sources
                 return [ColumnOrigin(table=table, column=name, expression_chain=name)]
-        # Fallback: attribute to every source that reports the column
-        results: List[ColumnOrigin] = []
+        # Fallback: Check sources in priority order (SelectSource first, then TableSource)
+        select_source_results: List[ColumnOrigin] = []
+        table_source_results: List[ColumnOrigin] = []
+        
         for a, src in sources:
             r = src.resolve_column(name)
             if r:
-                results.extend(r)
-        # If results contain the same column from different tables and column appears in schema uniquely for one, keep only that
-        tables = {o.table for o in results if o.table}
-        if len(tables) > 1:
-            unique_hits = [t for t in tables if name in self.schema.columns(t)]
-            if len(unique_hits) == 1:
-                results = [o for o in results if o.table == unique_hits[0]]
-            else:
-                # Deterministic choice: keep origins from the first source that reported the column
-                order = []
-                for a, src in sources:
-                    if isinstance(src, TableSource):
-                        order.append(src.table_name)
-                first = None
-                for o in results:
-                    if o.table in order:
-                        first = o.table
-                        break
-                if first:
-                    results = [o for o in results if o.table == first]
-        return results or [ColumnOrigin(table=None, column=name, expression_chain=name)]
+                if isinstance(src, SelectSource):
+                    select_source_results.extend(r)
+                elif isinstance(src, TableSource):
+                    table_source_results.extend(r)
+        
+        # Priority 1: SelectSource results (CTEs, subqueries)
+        if select_source_results:
+            return select_source_results
+        
+        # Priority 2: TableSource results with schema validation
+        if table_source_results:
+            schema_based_results = [o for o in table_source_results if o.table and self.schema.columns(o.table)]
+            unknown_table_results = [o for o in table_source_results if not (o.table and self.schema.columns(o.table))]
+            
+            # Use schema-based results if available
+            if schema_based_results:
+                unique_tables = set(o.table for o in schema_based_results)
+                if len(unique_tables) == 1:
+                    return schema_based_results
+                else:
+                    # Multiple tables in schema have this column - ambiguity
+                    return schema_based_results
+            
+            # Handle unknown tables
+            if unknown_table_results:
+                unique_tables = set(o.table for o in unknown_table_results)
+                if len(unique_tables) == 1:
+                    # Only one table (not in schema) - attribute to it
+                    return unknown_table_results
+                else:
+                    # Multiple tables, no schema info - cannot resolve
+                    return [ColumnOrigin(table=None, column=name, expression_chain=name)]
+        
+        # No results found
+        return [ColumnOrigin(table=None, column=name, expression_chain=name)]

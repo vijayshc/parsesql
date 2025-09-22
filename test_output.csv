@@ -4,10 +4,11 @@ customers,first_name,first_name,first_name,test1,sql/test.sql
 customers,last_name,last_name,last_name,test1,sql/test.sql
 customers,status,status,status,test1,sql/test.sql
 test1,customer_id,customer_id,customer_id,,sql/test.sql
-test1,order_id,order_id,order_id,,sql/test.sql
-test1,total_amount,total_amount~total_amount * 1.1,adjusted,,sql/test.sql
-base2,first_name,"first_name~CONCAT(first_name, last_name)~MAX(test)",max_0,,sql/test_ctas_with.sql
-base2,last_name,"last_name~CONCAT(first_name, last_name)~MAX(test)",max_0,,sql/test_ctas_with.sql
+,,order_id,order_id,,sql/test.sql
+,,total_amount * 1.1,adjusted,,sql/test.sql
+customer,first_name,first_name~c.first_name~first_name,first_name,test1,sql/test_ctas_with.sql
+customer,last_name,last_name~c.last_name~last_name,last_name,test1,sql/test_ctas_with.sql
+account,acc_num,acc_num~a.acc_num~acc_num,acc_num,test1,sql/test_ctas_with.sql
 customers,customer_id,customer_id~c1.customer_id~c2.customer_id~c4.customer_id,customer_id,,sql/test_cte_alias_chain_prune.sql
 customers,customer_id,customer_id,customer_id,,sql/test_cte_complex.sql
 customers,first_name,first_name,first_name,,sql/test_cte_complex.sql

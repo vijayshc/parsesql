@@ -1,18 +1,12 @@
-create table customer1 
+create table test1
 as
 with base as (
-    select first_name,last_name
-    from (
-        select * from customers1
-    )
+    select c.first_name,c.last_name from customer c
 ),
 with base2 as (
-    select * from base
+    select a.acc_num from account a
 )
-select * from base2;
-
-select first_id,last_id
-from (
-    select * from customer1
-) t1
-;
+select
+first_name, last_name, acc_num
+from base a
+left outer join base2 c;

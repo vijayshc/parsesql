@@ -30,8 +30,21 @@ class TableSource(SourceBase):
         return list(cols) if cols else ['*']
 
     def resolve_column(self, name: str) -> List[ColumnOrigin]:
-        # Even if schema doesn't list the column we still attribute to table
-        return [ColumnOrigin(table=self.table_name, column=_norm(name), expression_chain=_norm(name))]
+        # Check if table is in schema
+        table_columns = self.schema.columns(self.table_name)
+        normalized_name = _norm(name)
+        
+        if table_columns:
+            # Table is in schema - only return column if it exists in schema
+            if normalized_name in [_norm(col) for col in table_columns]:
+                return [ColumnOrigin(table=self.table_name, column=normalized_name, expression_chain=normalized_name)]
+            else:
+                # Table exists in schema but column doesn't - return empty
+                return []
+        else:
+            # Table not in schema - conservatively assume it might have the column
+            # This preserves backward compatibility but allows for better disambiguation
+            return [ColumnOrigin(table=self.table_name, column=normalized_name, expression_chain=normalized_name)]
 
 
 @dataclass
