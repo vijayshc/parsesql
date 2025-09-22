@@ -419,14 +419,44 @@ class SelectAnalyzer:
             concrete = [o for o in explicit_results if o.table or o.column]
             return concrete if concrete else explicit_results
         elif from_source_results:
-            # Apply conservative logic to FROM sources as well
-            # If FROM source is unknown (no schema), be conservative
+            # Apply process of elimination logic to FROM sources with JOINs
+            if len(sources) > 1:
+                # We have FROM + JOINs - apply elimination logic
+                all_results = []
+                sources_definitely_not_having_column = []
+                
+                for i, (alias, src) in enumerate(sources):
+                    result = src.resolve_column(name)
+                    if result and any(o.table for o in result):
+                        all_results.append((alias, src, result))
+                    
+                    # Check if we can definitively say this source does NOT have the column
+                    if isinstance(src, SelectSource):
+                        output_cols = src.output_columns()
+                        normalized_name = _norm(name)
+                        if (output_cols and 
+                            not any(_norm(col) == normalized_name for col in output_cols) and
+                            not any(col.startswith('col_') for col in output_cols)):
+                            sources_definitely_not_having_column.append((alias, src))
+                
+                # Filter out sources that definitely don't have the column
+                remaining_sources = []
+                for alias, src, result in all_results:
+                    if (alias, src) not in sources_definitely_not_having_column:
+                        remaining_sources.append((alias, src, result))
+                
+                # If elimination leaves exactly one source, use it
+                if len(remaining_sources) == 1:
+                    _, _, result = remaining_sources[0]
+                    return result
+                elif len(remaining_sources) == 0:
+                    return [ColumnOrigin(table=None, column=name, expression_chain=name)]
             
-            # Check if FROM source has schema validation
+            # Apply conservative logic to FROM sources when they're unknown tables
             first_alias, first_src = sources[0] if sources else (None, None)
             if (first_src and isinstance(first_src, TableSource) and 
                 not first_src.schema.columns(first_src.table_name)):
-                # FROM source is unknown table - be conservative
+                # FROM source is unknown table - be conservative if no elimination helped
                 return [ColumnOrigin(table=None, column=name, expression_chain=name)]
             
             # FROM source has schema or is SelectSource - trust it
@@ -436,10 +466,51 @@ class SelectAnalyzer:
             concrete = [o for o in schema_join_results if o.table or o.column]
             return concrete if concrete else schema_join_results
         elif unknown_join_results:
-            # For unknown JOIN sources, be very conservative
+            # Enhanced logic: Process of elimination for unknown sources
+            # When we have unknown sources claiming to have a column,
+            # check if we can eliminate other sources that definitely DON'T have it
+            
+            # Collect all sources and check which ones definitely DON'T have the column
+            all_sources = []
+            sources_claiming_column = []
+            sources_definitely_not_having_column = []
+            
+            for i, (alias, src) in enumerate(sources):
+                all_sources.append((alias, src))
+                
+                # Check if this source claims to have the column
+                result = src.resolve_column(name)
+                if result and any(o.table for o in result):
+                    sources_claiming_column.append((alias, src, result))
+                
+                # Check if we can definitively say this source does NOT have the column
+                if isinstance(src, SelectSource):
+                    output_cols = src.output_columns()
+                    normalized_name = _norm(name)
+                    if (output_cols and 
+                        not any(_norm(col) == normalized_name for col in output_cols) and
+                        not any(col.startswith('col_') for col in output_cols)):  # Not placeholder columns
+                        sources_definitely_not_having_column.append((alias, src))
+            
+            # Apply process of elimination
+            if len(sources_claiming_column) > 1:
+                # Multiple sources claim to have the column
+                # Filter out sources that we know definitely don't have it
+                remaining_sources = []
+                for alias, src, result in sources_claiming_column:
+                    if (alias, src) not in sources_definitely_not_having_column:
+                        remaining_sources.append((alias, src, result))
+                
+                # If elimination leaves us with exactly one source, use it
+                if len(remaining_sources) == 1:
+                    _, _, result = remaining_sources[0]
+                    return result
+                elif len(remaining_sources) == 0:
+                    # All sources were eliminated - shouldn't happen, but be safe
+                    return [ColumnOrigin(table=None, column=name, expression_chain=name)]
+            
+            # Fallback: For unknown JOIN sources, be very conservative
             # Only return results if there's high confidence about the column
-            # For tables without schema, we have no evidence they actually have the requested column
-            # Return None instead of guessing
             return [ColumnOrigin(table=None, column=name, expression_chain=name)]
         else:
             return [ColumnOrigin(table=None, column=name, expression_chain=name)]
