@@ -143,17 +143,31 @@ class SelectSource(SourceBase):
         if result:
             return result
         
-        # Inference for * expansion when schema is not available
-        # If this SelectSource contains a * but couldn't resolve it due to missing schema,
-        # we can infer that requested columns might come from that *
-        if self._has_star_expansion():
-            star_sources = self._get_star_sources()
-            if star_sources:
-                # Infer that the requested column comes from the star expansion
-                return [ColumnOrigin(table=star_sources[0], column=name, expression_chain=name)]
+        # Demand-driven resolution for star expansion from unknown schema tables
+        # When a SelectSource contains a * from an unknown table and a specific column is requested,
+        # we can infer that the column comes from the star expansion if it's the only source
         
-        # CTE/Subquery should ONLY expose explicitly selected columns
-        # No fallback to underlying sources - this violates SQL scope rules
+        # Re-analyze to check for demand-responsive star expansions
+        from .analyzer import SelectAnalyzer
+        analyzer = SelectAnalyzer(self.select, self.env, self.schema)
+        expr_lineages = analyzer.analyze()
+        
+        # Look for star expansion lineages that can handle this column request
+        for el in expr_lineages:
+            if (el.expression_sql == '*' and 
+                not el.output_column and  # Demand-driven (no specific output)
+                el.origins and 
+                len(el.origins) == 1 and 
+                el.origins[0].column == '*'):
+                
+                # This is a demand-responsive star expansion
+                # We can infer the requested column comes from this source
+                table_name = el.origins[0].table
+                if table_name:
+                    return [ColumnOrigin(table=table_name, column=name, expression_chain=name)]
+        
+        # For SelectSource (CTE/Subquery), only expose explicitly selected columns
+        # Do not allow any fallback inference that could lead to false positives
         return []
     
     def _has_star_expansion(self) -> bool:

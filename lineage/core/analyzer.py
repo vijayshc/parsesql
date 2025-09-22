@@ -208,12 +208,12 @@ class SelectAnalyzer:
                 col_name = _norm(col)
                 # Handle placeholder '*' from sources with unknown schema
                 if col_name == '*':
-                    # Create a special lineage entry for unknown star expansion
-                    # This will allow SelectSource to detect and infer from it later
+                    # Create a demand-responsive lineage entry for unknown schema tables
+                    # This allows the SelectSource to handle column requests dynamically
                     table_name = getattr(src, 'table_name', None)
                     origins.append(ExpressionLineage(
                         expression_sql='*', 
-                        output_column=None,  # No specific output column
+                        output_column=None,  # No specific output column - demand-driven
                         origins=(ColumnOrigin(table=table_name, column='*', expression_chain='*'),)
                     ))
                     continue
@@ -383,12 +383,12 @@ class SelectAnalyzer:
             if name.startswith(pref) and any(t.endswith(table) or t == table for t in candidate_tables):
                 # Accept prefix inference only if table participates in sources
                 return [ColumnOrigin(table=table, column=name, expression_chain=name)]
-        # Enhanced scope-aware resolution with explicit column priority
+        # Enhanced scope-aware resolution with strict unknown table handling
         # Priority order:
         # 1. Explicit column definitions (subqueries that specifically select the column)
-        # 2. FROM clause (main source)
+        # 2. FROM clause (main source) 
         # 3. JOIN sources with schema-defined columns  
-        # 4. JOIN sources without schema (less certain)
+        # 4. JOIN sources without schema (only if no better options exist)
         
         explicit_results: List[ColumnOrigin] = []
         from_source_results: List[ColumnOrigin] = []
@@ -408,26 +408,39 @@ class SelectAnalyzer:
                     if isinstance(src, TableSource) and src.schema.columns(src.table_name):
                         schema_join_results.extend(r)
                     else:
-                        unknown_join_results.extend(r)
+                        # Unknown source - be very conservative
+                        # Only include if the result has concrete table/column information
+                        concrete_results = [o for o in r if o.table and o.column and o.column != '*']
+                        if concrete_results:
+                            unknown_join_results.extend(concrete_results)
         
-        # Apply priority resolution:
-        # 1. If explicit sources exist, use them (most specific)
-        # 2. Else if FROM source has it, use FROM
-        # 3. Else if schema-validated JOINs have it, use them
-        # 4. Else use unknown JOIN sources
-        
+        # Apply priority resolution with stricter unknown table handling:
         if explicit_results:
             concrete = [o for o in explicit_results if o.table or o.column]
             return concrete if concrete else explicit_results
         elif from_source_results:
+            # Apply conservative logic to FROM sources as well
+            # If FROM source is unknown (no schema), be conservative
+            
+            # Check if FROM source has schema validation
+            first_alias, first_src = sources[0] if sources else (None, None)
+            if (first_src and isinstance(first_src, TableSource) and 
+                not first_src.schema.columns(first_src.table_name)):
+                # FROM source is unknown table - be conservative
+                return [ColumnOrigin(table=None, column=name, expression_chain=name)]
+            
+            # FROM source has schema or is SelectSource - trust it
             concrete = [o for o in from_source_results if o.table or o.column]
             return concrete if concrete else from_source_results
         elif schema_join_results:
             concrete = [o for o in schema_join_results if o.table or o.column]
             return concrete if concrete else schema_join_results
         elif unknown_join_results:
-            concrete = [o for o in unknown_join_results if o.table or o.column]
-            return concrete if concrete else unknown_join_results
+            # For unknown JOIN sources, be very conservative
+            # Only return results if there's high confidence about the column
+            # For tables without schema, we have no evidence they actually have the requested column
+            # Return None instead of guessing
+            return [ColumnOrigin(table=None, column=name, expression_chain=name)]
         else:
             return [ColumnOrigin(table=None, column=name, expression_chain=name)]
     
@@ -453,9 +466,19 @@ class SelectAnalyzer:
                     if el.expression_sql != '*':
                         return True
             
+            # Special case: If this is a * expansion without schema support,
+            # do NOT consider it as explicitly defining any specific column
+            return False
+            
         elif isinstance(src, TableSource):
-            # For TableSource, all columns are equally explicit/implicit based on schema
-            # We consider schema-defined columns as "explicit" and unknown columns as "implicit"
-            return bool(src.schema.columns(src.table_name))
+            # For TableSource, only consider columns explicit if they're in the schema
+            # Tables without schema information cannot explicitly define specific columns
+            table_columns = src.schema.columns(src.table_name)
+            if table_columns:
+                normalized_name = _norm(column_name)
+                return normalized_name in [_norm(col) for col in table_columns]
+            else:
+                # No schema means we can't explicitly define any specific columns
+                return False
         
         return False

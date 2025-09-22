@@ -9,4 +9,4 @@ left outer join table2 t2
 on 1=2
 left outer join table3  t3
 on 1=2
-left outer join (select entitity from table4) t4;
+left outer join (select * from table4) t4;
