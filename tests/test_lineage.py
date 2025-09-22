@@ -743,6 +743,58 @@ def test_ctas_with_cte_chain():
     assert ('customer_id','customers','customer_id') in triples
     assert any(r.target_table=='tgt_chain' for r in recs)
 
+
+def test_ctas_with_internal_cte():
+    """Test CTAS with WITH clause inside the CREATE statement (not before it)."""
+    sql = """
+    CREATE TABLE test_internal AS
+    WITH base AS (
+        SELECT * FROM customers
+    )
+    SELECT * FROM base
+    """
+    recs = _extract(sql)
+    
+    # Should have 4 lineage records for all customer columns
+    ctas_records = [r for r in recs if r.target_table == 'test_internal']
+    assert len(ctas_records) == 4, f"Expected 4 CTAS records, got {len(ctas_records)}"
+    
+    # Validate complete quads (target_column, source_table, source_column, target_table)
+    quads = _quads(recs)
+    expected_quads = {
+        ('customer_id', 'customers', 'customer_id', 'test_internal'),
+        ('first_name', 'customers', 'first_name', 'test_internal'),
+        ('last_name', 'customers', 'last_name', 'test_internal'),
+        ('status', 'customers', 'status', 'test_internal'),
+    }
+    ctas_quads = {q for q in quads if q[3] == 'test_internal'}
+    assert ctas_quads == expected_quads, f"Expected {expected_quads}, got {ctas_quads}"
+
+
+def test_ctas_with_complex_internal_cte():
+    """Test CTAS with complex WITH clause including multiple CTEs and transformations."""
+    sql = """
+    CREATE TABLE test_complex AS
+    WITH 
+        base AS (SELECT customer_id, first_name FROM customers),
+        transformed AS (SELECT customer_id, UPPER(first_name) AS name_upper FROM base)
+    SELECT customer_id, name_upper FROM transformed
+    """
+    recs = _extract(sql)
+    
+    # Should have 2 lineage records
+    ctas_records = [r for r in recs if r.target_table == 'test_complex']
+    assert len(ctas_records) == 2, f"Expected 2 CTAS records, got {len(ctas_records)}"
+    
+    # Validate mappings
+    quads = _quads(recs)
+    expected_quads = {
+        ('customer_id', 'customers', 'customer_id', 'test_complex'),
+        ('name_upper', 'customers', 'first_name', 'test_complex'),
+    }
+    ctas_quads = {q for q in quads if q[3] == 'test_complex'}
+    assert ctas_quads == expected_quads, f"Expected {expected_quads}, got {ctas_quads}"
+
 def test_ctas_constants_and_multi_origin():
     sql = """
     CREATE TABLE tgt_expr AS

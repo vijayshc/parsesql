@@ -1,5 +1,8 @@
 create table test as
 with base as (
-    select * from customers
+    select concat(first_name, ' ', last_name)  as test from customers1
 )
-select * from base;
+,with base2 as (
+    select * from base
+)
+select * from base2;

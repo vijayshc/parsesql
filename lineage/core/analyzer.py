@@ -191,8 +191,9 @@ class SelectAnalyzer:
                 if col_name == '*':
                     continue
                 col_origins = src.resolve_column(col_name)
-                for o in col_origins:
-                    origins.append(ExpressionLineage(expression_sql='*', output_column=col_name, origins=(o,)))
+                # Create one lineage entry with all origins for this column
+                if col_origins:
+                    origins.append(ExpressionLineage(expression_sql='*', output_column=col_name, origins=tuple(col_origins)))
         return origins
 
     def _expand_qualified_star(self, sources: List[Tuple[str, SourceBase]], proj: exp.Column) -> List[ExpressionLineage]:
@@ -208,8 +209,9 @@ class SelectAnalyzer:
                 if col_name == '*':
                     continue
                 col_origins = src.resolve_column(col_name)
-                for o in col_origins:
-                    out.append(ExpressionLineage(expression_sql=f"{alias}.*", output_column=col_name, origins=(o,)))
+                # Create one lineage entry with all origins for this column
+                if col_origins:
+                    out.append(ExpressionLineage(expression_sql=f"{alias}.*", output_column=col_name, origins=tuple(col_origins)))
         return out
 
     def _origins_for_expression(self, expr: exp.Expression, sources: List[Tuple[str, SourceBase]]) -> List[ColumnOrigin]:
