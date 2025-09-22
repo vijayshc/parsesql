@@ -94,10 +94,12 @@ class SelectSource(SourceBase):
             
             if out_name:
                 outputs.append(out_name)
-                # Only set lineage if not already present (first occurrence wins)
+                # Accumulate all lineage for the same column (important for UNION cases)
                 if out_name not in idx:
-                    # Preserve expression chains as-is from the analyzer
                     idx[out_name] = list(el.origins)
+                else:
+                    # Add new origins to existing ones (for UNION, multiple CTEs, etc.)
+                    idx[out_name].extend(el.origins)
             # If expression is star expansion with origins but no output_column (due to star) add origin columns
             elif not out_name and el.expression_sql in ('*',) and el.origins:
                 for o in el.origins:
@@ -106,13 +108,19 @@ class SelectSource(SourceBase):
                         if o.column not in idx:
                             # For star expansion, preserve existing expression chains
                             idx[o.column] = [o]
+                        else:
+                            # Accumulate origins for the same column
+                            idx[o.column].append(o)
             # For unnamed direct column expressions (e.g., table.col) add the column name
             elif not out_name and el.expression_sql and '.' in el.expression_sql and len(el.origins) == 1:
                 origin = el.origins[0]
                 if origin.column and origin.column not in outputs:
                     outputs.append(origin.column)
-                    # Preserve expression chains as-is from the analyzer
-                    idx.setdefault(origin.column, []).append(origin)
+                    # Accumulate origins for the same column
+                    if origin.column not in idx:
+                        idx[origin.column] = [origin]
+                    else:
+                        idx[origin.column].append(origin)
         
         # If no outputs were generated, create a synthetic column for star expansion fallback
         if not outputs and expr_lineages:
