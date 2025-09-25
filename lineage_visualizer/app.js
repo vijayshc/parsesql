@@ -42,6 +42,16 @@
   };
 
   let currentTheme = document.documentElement.getAttribute("data-theme") || "dark";
+  const textMeasureContext = document.createElement("canvas").getContext("2d");
+  const HEADER_FONT = "600 16px 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  const HEADER_FONT_SIZE = 16;
+  const HEADER_LETTER_SPACING = 0.04;
+  const COLUMN_FONT = "500 15px 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  const MIN_CARD_WIDTH = 260;
+  const MAX_CARD_WIDTH = 1400;
+  const HEADER_PADDING = 56;
+  const COLUMN_PADDING = 56;
+  const META_ALLOWANCE = 120;
   let currentFileName = "";
   const resizeHandler = debounce(() => drawConnections(), 120);
   const scrollHandler = debounce(() => drawConnections(), 60);
@@ -416,7 +426,12 @@
     refs.cardsContainer.innerHTML = "";
     refs.connectionsLayer.innerHTML = "";
 
-    const layout = computeLaneLayout();
+    const cardWidths = new Map();
+    state.groups.forEach((group) => {
+      cardWidths.set(group.id, computeCardWidth(group));
+    });
+
+    const layout = computeLaneLayout(cardWidths);
 
     layout.groups.forEach((group) => {
       const card = document.createElement("article");
@@ -424,6 +439,7 @@
       card.dataset.groupId = group.id;
       card.style.left = `${group.position.x}px`;
       card.style.top = `${group.position.y}px`;
+      card.style.width = `${group.width}px`;
 
       const header = document.createElement("header");
       header.textContent = group.label;
@@ -468,13 +484,13 @@
     updateCanvasBounds();
   }
 
-  function computeLaneLayout() {
-  const laneGap = 520;
-  const verticalGap = 48;
-  const stackGap = 160;
+  function computeLaneLayout(cardWidths) {
+    const laneGap = 180;
+    const verticalGap = 48;
+    const stackGap = 160;
     const cardHeaderHeight = 56;
     const rowHeight = 44;
-    const cardWidth = 260;
+    const horizontalMargin = 64;
 
     const incoming = new Map();
     state.edges.forEach((edge) => {
@@ -504,36 +520,53 @@
 
     const sortedLevels = Array.from(levelBuckets.keys()).sort((a, b) => a - b);
 
+    const levelOffsets = new Map();
+    let runningX = horizontalMargin;
+
+    sortedLevels.forEach((level) => {
+      const groupsAtLevel = levelBuckets.get(level) || [];
+      const widest = groupsAtLevel.reduce((max, group) => {
+        const width = cardWidths.get(group.id) || MIN_CARD_WIDTH;
+        return Math.max(max, width);
+      }, MIN_CARD_WIDTH);
+      levelOffsets.set(level, runningX);
+      runningX += widest + laneGap;
+    });
+
+    const totalWidth = Math.max(runningX, refs.graphWrapper.clientWidth);
+
     const positionedGroups = [];
-    let requiredWidth = refs.graphWrapper.clientWidth;
+    let requiredWidth = totalWidth;
     let requiredHeight = refs.graphWrapper.clientHeight;
 
     sortedLevels.forEach((level) => {
       const groupsAtLevel = levelBuckets.get(level) || [];
       let currentY = verticalGap;
+      const levelX = levelOffsets.get(level) ?? horizontalMargin;
       groupsAtLevel.forEach((group) => {
         const cardHeight = cardHeaderHeight + group.columns.length * rowHeight;
+        const width = cardWidths.get(group.id) || MIN_CARD_WIDTH;
         positionedGroups.push({
           id: group.id,
           label: group.label,
           position: {
-            x: level * laneGap,
+            x: levelX,
             y: currentY
           },
-          columns: group.columns
+          columns: group.columns,
+          width
         });
 
         const bottom = currentY + cardHeight;
         if (bottom > requiredHeight) {
           requiredHeight = bottom + stackGap;
         }
+        const right = levelX + width;
+        if (right + laneGap > requiredWidth) {
+          requiredWidth = right + laneGap;
+        }
         currentY = bottom + stackGap;
       });
-
-      const levelRight = level * laneGap + cardWidth;
-      if (levelRight > requiredWidth) {
-        requiredWidth = levelRight + laneGap;
-      }
     });
 
     return {
@@ -543,6 +576,35 @@
         height: Math.max(requiredHeight, refs.graphWrapper.clientHeight)
       }
     };
+  }
+
+  function computeCardWidth(group) {
+    if (!textMeasureContext) return MIN_CARD_WIDTH;
+    let maxWidth = measureHeaderWidth(group.label);
+    group.columns.forEach((nodeId) => {
+      const column = state.nodes.get(nodeId);
+      if (!column) return;
+      const name = column.displayName || column.column || column.label || "";
+      maxWidth = Math.max(maxWidth, measureColumnWidth(name));
+    });
+    return Math.max(MIN_CARD_WIDTH, Math.min(MAX_CARD_WIDTH, maxWidth));
+  }
+
+  function measureHeaderWidth(text) {
+    if (!textMeasureContext) return MIN_CARD_WIDTH;
+    const content = (text || "").toUpperCase();
+    textMeasureContext.font = HEADER_FONT;
+    const metrics = textMeasureContext.measureText(content);
+    const baseWidth = metrics?.width || 0;
+    const letterSpacingWidth = content.length * HEADER_FONT_SIZE * HEADER_LETTER_SPACING;
+    return Math.ceil(baseWidth + letterSpacingWidth + HEADER_PADDING);
+  }
+
+  function measureColumnWidth(text) {
+    if (!textMeasureContext) return MIN_CARD_WIDTH;
+    textMeasureContext.font = COLUMN_FONT;
+    const metrics = textMeasureContext.measureText(text || "");
+    return Math.ceil((metrics?.width || 0) + COLUMN_PADDING + META_ALLOWANCE);
   }
 
   function enableDrag(card) {

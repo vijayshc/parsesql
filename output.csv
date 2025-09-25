@@ -1,5 +1,5 @@
 source_table,source_column,expression,target_column,target_table,file
-customers,customer_id,customer_id,customer_id,test1,sql/test.sql
+customers.dfkdjfdfldfldfldkfjdlsfldfdsl,customer_iddfdkfjdlfdljffjdlfdfdslfsfl,customer_id,customer_id,test1,sql/test.sql
 customers,first_name,first_name,first_name,test1,sql/test.sql
 customers,last_name,last_name,last_name,test1,sql/test.sql
 customers,status,status,status,test1,sql/test.sql
