@@ -1,5 +1,6 @@
 (function () {
   const REQUIRED_COLUMNS = ["source_table", "source_column", "expression", "target_column", "target_table", "file"];
+  const THEME_STORAGE_KEY = "lineage-theme";
 
   const state = {
     nodes: new Map(),
@@ -20,6 +21,7 @@
     loadSample: document.getElementById("loadSample"),
     resetButton: document.getElementById("resetButton"),
     downloadButton: document.getElementById("downloadButton"),
+    themeToggle: document.getElementById("themeToggle"),
     nodeCount: document.getElementById("nodeCount"),
     edgeCount: document.getElementById("edgeCount"),
     fileName: document.getElementById("fileName"),
@@ -39,6 +41,7 @@
     emptyState: document.getElementById("emptyState")
   };
 
+  let currentTheme = document.documentElement.getAttribute("data-theme") || "dark";
   let currentFileName = "";
   const resizeHandler = debounce(() => drawConnections(), 120);
   const scrollHandler = debounce(() => drawConnections(), 60);
@@ -47,6 +50,7 @@
 
   function init() {
     attachListeners();
+    initializeTheme();
     window.addEventListener("resize", resizeHandler);
     refs.graphWrapper.addEventListener("scroll", scrollHandler, { passive: true });
   }
@@ -63,6 +67,7 @@
     refs.resetButton.addEventListener("click", () => resetView());
     refs.downloadButton.addEventListener("click", () => downloadImage());
     refs.searchInput.addEventListener("input", () => handleSearch(refs.searchInput.value.trim().toLowerCase()));
+    refs.themeToggle?.addEventListener("click", () => toggleTheme());
 
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape") {
@@ -70,6 +75,49 @@
         handleSearch("");
       }
     });
+  }
+
+  function initializeTheme() {
+    let theme = currentTheme;
+    try {
+      const stored = localStorage.getItem(THEME_STORAGE_KEY);
+      if (stored === "light" || stored === "dark") {
+        theme = stored;
+      }
+    } catch (error) {
+      theme = currentTheme;
+    }
+    applyTheme(theme, false);
+  }
+
+  function toggleTheme() {
+    const next = currentTheme === "light" ? "dark" : "light";
+    applyTheme(next);
+  }
+
+  function applyTheme(theme, persist = true) {
+    const normalized = theme === "light" ? "light" : "dark";
+    currentTheme = normalized;
+    document.documentElement.setAttribute("data-theme", normalized);
+    document.documentElement.style.colorScheme = normalized === "light" ? "light" : "dark";
+    if (persist) {
+      try {
+        localStorage.setItem(THEME_STORAGE_KEY, normalized);
+      } catch (error) {
+        /* no-op */
+      }
+    }
+    updateThemeToggle();
+  }
+
+  function updateThemeToggle() {
+    if (!refs.themeToggle) return;
+    const isLight = currentTheme === "light";
+    refs.themeToggle.textContent = isLight ? "Dark theme" : "Light theme";
+    refs.themeToggle.setAttribute("aria-pressed", isLight ? "true" : "false");
+    const label = isLight ? "Switch to dark theme" : "Switch to light theme";
+    refs.themeToggle.setAttribute("aria-label", label);
+    refs.themeToggle.title = label;
   }
 
   function parseCsvFile(file) {

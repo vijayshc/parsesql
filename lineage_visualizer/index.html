@@ -1,8 +1,22 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script>
+    (function () {
+      try {
+        const storedTheme = localStorage.getItem("lineage-theme");
+        const fallback = document.documentElement.getAttribute("data-theme") || "dark";
+        const theme = storedTheme === "light" || storedTheme === "dark" ? storedTheme : fallback;
+        document.documentElement.setAttribute("data-theme", theme);
+        document.documentElement.style.colorScheme = theme === "light" ? "light" : "dark";
+      } catch (error) {
+        document.documentElement.setAttribute("data-theme", "dark");
+        document.documentElement.style.colorScheme = "dark";
+      }
+    })();
+  </script>
   <title>Lineage Visualizer</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -40,6 +54,7 @@
       </div>
       <div class="status-spacer"></div>
       <div class="layout-controls">
+        <button id="themeToggle" type="button" class="ghost" aria-pressed="false" aria-label="Switch to light theme">Light theme</button>
         <button id="resetButton" type="button" class="ghost">Reset view</button>
         <button id="downloadButton" type="button" class="ghost">Download PNG</button>
       </div>
