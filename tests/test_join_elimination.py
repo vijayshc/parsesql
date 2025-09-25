@@ -61,12 +61,12 @@ def test_join_elimination_known_table_with_unknown_table():
     assert triples == expected, f"Expected {expected}, got {triples}"
 
 def test_join_elimination_multiple_unknown_tables():
-    """Test elimination with multiple unknown tables."""
+    """Test elimination with multiple unknown tables - should be conservative."""
     sql = """
     with precise_cte as (
-        select specific_col1, specific_col2 from known_table
+        select col1, col2 from test_table
     )
-    select mystery_col, specific_col1 
+    select mystery_col, col1 
     from precise_cte p
     inner join mystery_table1 m1 on 1=1
     inner join mystery_table2 m2 on 1=1
@@ -74,20 +74,20 @@ def test_join_elimination_multiple_unknown_tables():
     recs = _extract(sql)
     triples = _triples(recs)
     
-    # specific_col1 should resolve to known_table (via precise_cte)
+    # col1 should resolve to test_table (via precise_cte)
     # mystery_col can't be resolved definitively between mystery_table1/mystery_table2
-    # so it should pick one or return none - let's check what happens
+    # so it should return None (conservative approach)
     
-    specific_col_results = [r for r in recs if r.target_column == 'specific_col1']
+    col1_results = [r for r in recs if r.target_column == 'col1']
     mystery_col_results = [r for r in recs if r.target_column == 'mystery_col']
     
-    assert len(specific_col_results) == 1
-    assert specific_col_results[0].source_table == 'known_table'
-    assert specific_col_results[0].source_column == 'specific_col1'
+    assert len(col1_results) == 1
+    assert col1_results[0].source_table == 'test_table'
+    assert col1_results[0].source_column == 'col1'
     
-    # For mystery_col, we expect either None or one of the mystery tables
+    # For mystery_col, since both unknown tables could have it, should be conservative
     assert len(mystery_col_results) == 1
-    # Since both unknown tables could have the column, behavior may vary
+    assert mystery_col_results[0].source_table is None  # Conservative approach
 
 def test_join_elimination_nested_cte_scenario():
     """Test the original problematic scenario with nested CTEs and JOINs."""
@@ -127,9 +127,29 @@ def test_join_elimination_ambiguous_case():
     recs = _extract(sql)
     
     # Since both tables are unknown and could have ambiguous_col,
-    # the result should be conservative (could be None or pick one)
+    # the result should be conservative (None)
     assert len(recs) == 1
-    # The behavior here depends on implementation details
+    assert recs[0].source_table is None
+
+def test_join_elimination_single_unknown_after_elimination():
+    """Test that single unknown table works after elimination."""
+    sql = """
+    with known_cte as (
+        select col1, col2, col3 from test_table
+    )
+    select unknown_col, col1 from known_cte
+    inner join single_unknown_table on 1=1
+    """
+    recs = _extract(sql)
+    triples = _triples(recs)
+    
+    # col1 should resolve to test_table (via known_cte)
+    # unknown_col should resolve to single_unknown_table (only unknown source left)
+    expected = {
+        ('col1', 'test_table', 'col1'),
+        ('unknown_col', 'single_unknown_table', 'unknown_col')
+    }
+    assert triples == expected, f"Expected {expected}, got {triples}"
 
 def test_join_elimination_with_qualified_columns():
     """Test that qualified column references work correctly."""

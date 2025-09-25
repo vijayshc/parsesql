@@ -122,6 +122,28 @@ CSV with columns:
 - `file`: Source file path
 - `engine`: SQL engine used
 
+## Lineage Visualization UI
+
+Explore lineage interactively with the standalone web module in `lineage_visualizer/`:
+
+1. Start a lightweight web server from the project root (recommended for loading bundled assets):
+
+```bash
+python -m http.server 8000
+```
+
+2. Open `http://localhost:8000/lineage_visualizer/` in your browser.
+3. Upload the generated `output.csv` (or click **Load sample** after starting the server) to render the graph.
+
+Features:
+- Column-level nodes with upstream/downstream highlighting on click.
+- Columns are grouped beneath their parent tables for clarity, mirroring familiar lineage explorers.
+- Search panel to spotlight tables/columns instantly.
+- Inspector with table/column/file/expression context.
+- Download the rendered diagram as a high-resolution PNG snapshot.
+
+The data transformation powering the UI is mirrored in `lineage_visualizer/transform.py`, enabling automated validation and future backend integrations.
+
 ## Examples
 
 ### Input SQL
@@ -183,5 +205,11 @@ python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 PYTHONPATH=. pytest -q
+```
+
+To execute only the visualization-specific tests:
+
+```bash
+PYTHONPATH=. pytest -q tests/test_lineage_visualizer.py
 ```
 

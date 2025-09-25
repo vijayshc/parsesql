@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lineage Visualizer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="hero">
+      <div class="hero-copy">
+        <h1>Column Lineage Visualizer</h1>
+        <p>Upload a lineage CSV to explore table cards, column dependencies, and expression flows modeled after OpenMetadata.</p>
+      </div>
+      <div class="hero-actions">
+        <label class="upload-button" for="fileInput">
+          <input type="file" id="fileInput" accept=".csv" />
+          <span>Upload CSV</span>
+        </label>
+        <button id="loadSample" type="button" class="secondary">Load sample</button>
+      </div>
+    </header>
+
+    <section class="status-bar" aria-live="polite">
+      <div class="stat">
+        <span id="nodeCount">0</span>
+        <label>Columns</label>
+      </div>
+      <div class="stat">
+        <span id="edgeCount">0</span>
+        <label>Connections</label>
+      </div>
+      <div class="stat dataset">
+        <span id="fileName">No file loaded</span>
+        <label>Dataset</label>
+      </div>
+      <div class="status-spacer"></div>
+      <div class="layout-controls">
+        <button id="resetButton" type="button" class="ghost">Reset view</button>
+        <button id="downloadButton" type="button" class="ghost">Download PNG</button>
+      </div>
+    </section>
+
+    <section class="workspace">
+      <aside class="sidebar">
+        <div class="panel">
+          <h2>Inspector</h2>
+          <div id="inspectorEmpty" class="placeholder">
+            <p>Select a column row to highlight upstream inputs and downstream consumers.</p>
+          </div>
+          <div id="inspector" class="inspector hidden">
+            <dl>
+              <div><dt>Column</dt><dd id="infoColumn"></dd></div>
+              <div><dt>Table</dt><dd id="infoTable"></dd></div>
+            </dl>
+            <div id="fileView" class="file-view hidden">
+              <label for="infoFile">File</label>
+              <pre id="infoFile"></pre>
+            </div>
+            <div id="expressionView" class="expression-view hidden">
+              <label for="expressionContent">Expression</label>
+              <pre id="expressionContent"></pre>
+            </div>
+          </div>
+        </div>
+        <div class="panel">
+          <h2>Search</h2>
+          <input type="search" id="searchInput" placeholder="Find table or column…" aria-label="Search columns" />
+          <p class="hint">Matches glow. Press Esc to clear.</p>
+        </div>
+        <div id="message" class="message hidden" role="status"></div>
+      </aside>
+      <main class="canvas">
+        <div id="graphWrapper">
+          <div id="cardsContainer" aria-live="polite"></div>
+          <svg id="connectionsLayer" xmlns="http://www.w3.org/2000/svg"></svg>
+        </div>
+        <div id="emptyState" class="empty-state" role="presentation">
+          <h3>No lineage loaded yet</h3>
+          <p>Upload a lineage CSV to render interactive table cards and connection paths.</p>
+        </div>
+      </main>
+    </section>
+  </div>
+  <footer class="footer">
+    <p>Tip: serve this folder with a lightweight web server for best results (<span>python -m http.server</span>).</p>
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
