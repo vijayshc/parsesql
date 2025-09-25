@@ -13,7 +13,8 @@
       downstream: new Map()
     },
     columnCount: 0,
-    warnings: []
+    warnings: [],
+    activeFilter: null
   };
 
   const refs = {
@@ -196,9 +197,11 @@
     state.adjacency = model.adjacency;
     state.columnCount = model.columnCount;
     state.warnings = model.warnings;
+    state.activeFilter = null;
 
     currentFileName = filename;
 
+  refs.searchInput.value = "";
   renderCards();
   drawConnections();
     toggleEmptyState(false);
@@ -220,6 +223,7 @@
     state.adjacency = { upstream: new Map(), downstream: new Map() };
     state.columnCount = 0;
     state.warnings = [];
+    state.activeFilter = null;
     currentFileName = "";
     refs.cardsContainer.innerHTML = "";
     refs.connectionsLayer.innerHTML = "";
@@ -481,7 +485,11 @@
     refs.cardsContainer.style.height = `${layout.canvas.height}px`;
     refs.cardsContainer.dataset.minWidth = String(layout.canvas.width);
     refs.cardsContainer.dataset.minHeight = String(layout.canvas.height);
-    updateCanvasBounds();
+    if (state.activeFilter) {
+      updateFilterVisibility();
+    } else {
+      updateCanvasBounds();
+    }
   }
 
   function computeLaneLayout(cardWidths) {
@@ -667,6 +675,9 @@
   let maxBottom = minHeight;
 
     cards.forEach((card) => {
+      if (card.classList.contains("filtered-out") || card.offsetParent === null) {
+        return;
+      }
       const left = parseFloat(card.style.left || "0");
       const top = parseFloat(card.style.top || "0");
       const right = left + card.offsetWidth;
@@ -702,6 +713,12 @@
   const edgeOffset = 6;
 
     state.edges.forEach((edge) => {
+      if (state.activeFilter) {
+        const filter = state.activeFilter;
+        if (!filter.nodes.has(edge.source) || !filter.nodes.has(edge.target) || !filter.edges.has(edge.id)) {
+          return;
+        }
+      }
       const sourceEl = getColumnElement(edge.source);
       const targetEl = getColumnElement(edge.target);
       if (!sourceEl || !targetEl) return;
@@ -783,6 +800,9 @@
         getEdgeElement(edgeId)?.classList.add(className);
       });
     };
+
+    applyLabelClass(upstream.edges, "edge-upstream");
+    applyLabelClass(downstream.edges, "edge-downstream");
 
   const directUp = state.adjacency.upstream.get(nodeId) || new Set();
   const directDown = state.adjacency.downstream.get(nodeId) || new Set();
@@ -870,6 +890,7 @@
   function handleSearch(query) {
     clearHighlights();
     if (!query) {
+      clearFilter();
       showMessage("", "info");
       return;
     }
@@ -887,19 +908,23 @@
     });
 
     if (!matches.length) {
+      clearFilter();
       showMessage(`No matches found for “${query}”.`, "warning");
       return;
     }
 
+    const filter = buildFilter(matches);
+    applyFilter(filter);
+
     matches.forEach((id) => getColumnElement(id)?.classList.add("search-hit"));
-    document.querySelectorAll(".column-row:not(.search-hit)").forEach((row) => row.classList.add("dimmed"));
-    showMessage(`${matches.length} matches highlighted.`, "info");
+    showMessage(`${matches.length} match${matches.length > 1 ? "es" : ""} filtered.`, "info");
   }
 
   function resetView() {
     clearHighlights();
     resetInspector();
     refs.searchInput.value = "";
+    clearFilter();
     showMessage("", "info");
     drawConnections();
   }
@@ -911,6 +936,65 @@
     document.querySelectorAll(".link-path").forEach((path) =>
       path.classList.remove("edge-selected", "edge-upstream", "edge-downstream", "dimmed")
     );
+  }
+
+  function applyFilter(filter) {
+    state.activeFilter = filter;
+    updateFilterVisibility();
+    drawConnections();
+  }
+
+  function clearFilter() {
+    if (!state.activeFilter) {
+      updateFilterVisibility();
+      return;
+    }
+    state.activeFilter = null;
+    updateFilterVisibility();
+    drawConnections();
+  }
+
+  function updateFilterVisibility() {
+    const filter = state.activeFilter;
+    const cards = Array.from(refs.cardsContainer.querySelectorAll(".lineage-card"));
+    cards.forEach((card) => {
+      const rows = Array.from(card.querySelectorAll(".column-row"));
+      let visibleRows = 0;
+      rows.forEach((row) => {
+        const nodeId = row.dataset.nodeId;
+        const shouldShow = !filter || filter.nodes.has(nodeId);
+        row.classList.toggle("filtered-out", !!filter && !shouldShow);
+        if (shouldShow) visibleRows += 1;
+      });
+      const shouldShowCard = !filter || visibleRows > 0;
+      card.classList.toggle("filtered-out", !!filter && !shouldShowCard);
+    });
+    updateCanvasBounds();
+  }
+
+  function buildFilter(matchIds) {
+    const nodes = new Set();
+    const edges = new Set();
+
+    matchIds.forEach((id) => {
+      nodes.add(id);
+      const upstream = collectReachable(id, state.adjacency.upstream, (edge) => edge.source);
+      const downstream = collectReachable(id, state.adjacency.downstream, (edge) => edge.target);
+      upstream.nodes.forEach((nodeId) => nodes.add(nodeId));
+      downstream.nodes.forEach((nodeId) => nodes.add(nodeId));
+      upstream.edges.forEach((edgeId) => edges.add(edgeId));
+      downstream.edges.forEach((edgeId) => edges.add(edgeId));
+      (state.adjacency.upstream.get(id) || new Set()).forEach((edgeId) => edges.add(edgeId));
+      (state.adjacency.downstream.get(id) || new Set()).forEach((edgeId) => edges.add(edgeId));
+    });
+
+    state.edges.forEach((edge) => {
+      if (nodes.has(edge.source) && nodes.has(edge.target)) {
+        edges.add(edge.id);
+      }
+    });
+
+    return { nodes, edges };
   }
 
   function populateInspector(column, expressionsOverride = null) {

@@ -499,6 +499,9 @@ select {
   position: absolute;
   cursor: grab;
 }
+.lineage-card.filtered-out {
+  display: none;
+}
 .lineage-card.dragging {
   cursor: grabbing;
   box-shadow: var(--card-shadow-drag);
@@ -622,6 +625,10 @@ select {
 .column-row.downstream::before,
 .column-row.downstream::after {
   background: var(--column-downstream-border);
+}
+
+.column-row.filtered-out {
+  display: none;
 }
 
 .column-row.dimmed::before,

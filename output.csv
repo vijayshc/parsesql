@@ -36,3 +36,8 @@ orders,total_amount,total_amount~o.total_amount * 1.1,gross_amount,,sql/test_pla
 orders,total_amount,total_amount~CASE WHEN o.total_amount > 100 THEN 'LARGE' ELSE 'SMALL' END,size_flag,,sql/test_plain_complex.sql
 orders,customer_id,customer_id~ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY total_amount DESC)~t.rank_in_group,rank_in_group,,sql/test_plain_complex.sql
 orders,total_amount,total_amount~ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY total_amount DESC)~t.rank_in_group,rank_in_group,,sql/test_plain_complex.sql
+test1,t_message,tt,tt,test2,sql/test_plain_complex.sql
+test2,tt,tt,tt,test3,sql/test_plain_complex.sql
+test3,tt,tt,tt,test4,sql/test_plain_complex.sql
+test4,tt,tt,tt,test5,sql/test_plain_complex.sql
+test5,tt,tt,tt,test6,sql/test_plain_complex.sql
