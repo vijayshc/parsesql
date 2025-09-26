@@ -444,6 +444,9 @@
       card.style.left = `${group.position.x}px`;
       card.style.top = `${group.position.y}px`;
       card.style.width = `${group.width}px`;
+  card.dataset.baseLeft = String(group.position.x);
+  card.dataset.baseTop = String(group.position.y);
+  card.dataset.baseWidth = String(group.width);
 
       const header = document.createElement("header");
       header.textContent = group.label;
@@ -492,7 +495,7 @@
     }
   }
 
-  function computeLaneLayout(cardWidths) {
+  function computeLaneLayout(cardWidths, groupsOverride = null, filter = null) {
     const laneGap = 180;
     const verticalGap = 48;
     const stackGap = 160;
@@ -500,17 +503,28 @@
     const rowHeight = 44;
     const horizontalMargin = 64;
 
+    const groupsSource = groupsOverride || state.groups;
+    const groupIds = groupsSource.map((group) => group.id);
+    const groupById = new Map(groupsSource.map((group) => [group.id, group]));
+    const groupSet = new Set(groupIds);
+
     const incoming = new Map();
+    groupIds.forEach((id) => incoming.set(id, new Set()));
+
     state.edges.forEach((edge) => {
+      if (filter) {
+        if (!filter.edges.has(edge.id)) return;
+        if (!filter.nodes.has(edge.source) || !filter.nodes.has(edge.target)) return;
+      }
       const sourceGroup = state.nodeToGroup.get(edge.source);
       const targetGroup = state.nodeToGroup.get(edge.target);
       if (!sourceGroup || !targetGroup || sourceGroup === targetGroup) return;
-      if (!incoming.has(targetGroup)) incoming.set(targetGroup, new Set());
+      if (!groupSet.has(sourceGroup) || !groupSet.has(targetGroup)) return;
       incoming.get(targetGroup).add(sourceGroup);
     });
 
     const levelMap = new Map();
-    state.groups.forEach((group) => {
+    groupsSource.forEach((group) => {
       const parents = incoming.get(group.id) || new Set();
       let level = 0;
       parents.forEach((parentId) => {
@@ -520,7 +534,7 @@
     });
 
     const levelBuckets = new Map();
-    state.groups.forEach((group) => {
+    groupsSource.forEach((group) => {
       const level = levelMap.get(group.id) ?? 0;
       if (!levelBuckets.has(level)) levelBuckets.set(level, []);
       levelBuckets.get(level).push(group);
@@ -654,6 +668,12 @@
       isDragging = false;
       card.classList.remove("dragging");
       card.releasePointerCapture(event.pointerId);
+      if (!state.activeFilter) {
+        const left = parseFloat(card.style.left || "0");
+        const top = parseFloat(card.style.top || "0");
+        card.dataset.baseLeft = String(left);
+        card.dataset.baseTop = String(top);
+      }
       updateCanvasBounds();
       drawConnections();
     };
@@ -668,8 +688,12 @@
     const cards = Array.from(refs.cardsContainer.querySelectorAll(".lineage-card"));
     if (!cards.length) return;
 
-  const minWidth = parseFloat(refs.cardsContainer.dataset.minWidth || refs.graphWrapper.clientWidth);
-  const minHeight = parseFloat(refs.cardsContainer.dataset.minHeight || refs.graphWrapper.clientHeight);
+  const minWidth = state.activeFilter
+    ? refs.graphWrapper.clientWidth
+    : parseFloat(refs.cardsContainer.dataset.minWidth || refs.graphWrapper.clientWidth);
+  const minHeight = state.activeFilter
+    ? refs.graphWrapper.clientHeight
+    : parseFloat(refs.cardsContainer.dataset.minHeight || refs.graphWrapper.clientHeight);
 
   let maxRight = minWidth;
   let maxBottom = minHeight;
@@ -969,7 +993,101 @@
       const shouldShowCard = !filter || visibleRows > 0;
       card.classList.toggle("filtered-out", !!filter && !shouldShowCard);
     });
+    if (filter) {
+      repositionFilteredCards(filter);
+      focusVisibleCards();
+    } else {
+      restoreBasePositions();
+    }
     updateCanvasBounds();
+  }
+
+  function repositionFilteredCards(filter) {
+    const filteredGroups = state.groups
+      .map((group) => {
+        const columns = group.columns.filter((nodeId) => filter.nodes.has(nodeId));
+        if (!columns.length) return null;
+        return { id: group.id, label: group.label, columns };
+      })
+      .filter(Boolean);
+
+    if (!filteredGroups.length) {
+      restoreBasePositions();
+      return;
+    }
+
+    const widths = new Map();
+    filteredGroups.forEach((group) => {
+      widths.set(group.id, computeCardWidth(group));
+    });
+
+    const layout = computeLaneLayout(widths, filteredGroups, filter);
+    filteredGroups.forEach((group) => {
+      const placement = layout.groups.find((item) => item.id === group.id);
+      if (!placement) return;
+      const card = refs.cardsContainer.querySelector(`.lineage-card[data-group-id="${CSS.escape(group.id)}"]`);
+      if (!card) return;
+      card.style.left = `${placement.position.x}px`;
+      card.style.top = `${placement.position.y}px`;
+      card.style.width = `${placement.width}px`;
+    });
+
+    refs.cardsContainer.style.width = `${layout.canvas.width}px`;
+    refs.cardsContainer.style.height = `${layout.canvas.height}px`;
+  }
+
+  function restoreBasePositions() {
+    const cards = Array.from(refs.cardsContainer.querySelectorAll(".lineage-card"));
+    cards.forEach((card) => {
+      const baseLeft = parseFloat(card.dataset.baseLeft);
+      const baseTop = parseFloat(card.dataset.baseTop);
+      const baseWidth = parseFloat(card.dataset.baseWidth);
+      if (Number.isFinite(baseLeft)) {
+        card.style.left = `${baseLeft}px`;
+      }
+      if (Number.isFinite(baseTop)) {
+        card.style.top = `${baseTop}px`;
+      }
+      if (Number.isFinite(baseWidth)) {
+        card.style.width = `${baseWidth}px`;
+      }
+    });
+  }
+
+  function focusVisibleCards() {
+    const bounds = getVisibleBounds();
+    if (!bounds) return;
+    const padding = 80;
+    const targetLeft = Math.max(bounds.left - padding, 0);
+    const targetTop = Math.max(bounds.top - padding, 0);
+    refs.graphWrapper.scrollTo({ left: targetLeft, top: targetTop, behavior: "smooth" });
+  }
+
+  function getVisibleBounds() {
+    const visibleCards = Array.from(refs.cardsContainer.querySelectorAll(".lineage-card:not(.filtered-out)"));
+    if (!visibleCards.length) return null;
+    const wrapperRect = refs.graphWrapper.getBoundingClientRect();
+    let minLeft = Infinity;
+    let minTop = Infinity;
+    let maxRight = -Infinity;
+    let maxBottom = -Infinity;
+
+    visibleCards.forEach((card) => {
+      const rect = card.getBoundingClientRect();
+      if (rect.left < minLeft) minLeft = rect.left;
+      if (rect.top < minTop) minTop = rect.top;
+      if (rect.right > maxRight) maxRight = rect.right;
+      if (rect.bottom > maxBottom) maxBottom = rect.bottom;
+    });
+
+    const left = Math.max(minLeft - wrapperRect.left + refs.graphWrapper.scrollLeft, 0);
+    const top = Math.max(minTop - wrapperRect.top + refs.graphWrapper.scrollTop, 0);
+    const right = Math.max(maxRight - wrapperRect.left + refs.graphWrapper.scrollLeft, left);
+    const bottom = Math.max(maxBottom - wrapperRect.top + refs.graphWrapper.scrollTop, top);
+    const width = right - left;
+    const height = bottom - top;
+
+    return { left, top, right, bottom, width, height };
   }
 
   function buildFilter(matchIds) {
@@ -1063,7 +1181,26 @@
       return;
     }
     showMessage("Rendering image…", "info");
-    html2canvas(refs.graphWrapper, { backgroundColor: "#0b1120", scale: 2 })
+    const captureOptions = { backgroundColor: "#0b1120", scale: 2 };
+    const bounds = getVisibleBounds();
+    if (bounds) {
+      const padding = state.activeFilter ? 80 : 120;
+      const maxWidth = refs.graphWrapper.scrollWidth;
+      const maxHeight = refs.graphWrapper.scrollHeight;
+      const x = Math.max(bounds.left - padding, 0);
+      const y = Math.max(bounds.top - padding, 0);
+      const width = Math.max(Math.min(bounds.width + padding * 2, maxWidth), 320);
+      const height = Math.max(Math.min(bounds.height + padding * 2, maxHeight), 320);
+      Object.assign(captureOptions, {
+        x,
+        y,
+        width,
+        height,
+        scrollX: 0,
+        scrollY: 0
+      });
+    }
+    html2canvas(refs.graphWrapper, captureOptions)
       .then((canvas) => {
         const link = document.createElement("a");
         link.download = `${slugify(currentFileName || "lineage-view")}.png`;

@@ -330,10 +330,16 @@ select {
 }
 
 .inspector dl {
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   margin: 0;
+}
+
+.inspector dl > div {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .inspector dt {
