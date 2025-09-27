@@ -7,6 +7,7 @@ A modern, interactive web-based tool for visualizing SQL column lineage data. Th
 The Lineage Visualizer provides an intuitive interface for exploring complex SQL lineage relationships:
 
 - **Interactive Graph Visualization**: Drag and rearrange table cards to explore relationships
+- **Zoom & Pan Controls**: Mouse wheel zoom (10%-500%) and click-drag panning for easy navigation
 - **Column-Level Detail**: Click on any column to highlight upstream sources and downstream consumers
 - **Smart Search**: Find specific tables or columns instantly with live filtering
 - **Expression Inspector**: View SQL expressions and file sources for each lineage connection

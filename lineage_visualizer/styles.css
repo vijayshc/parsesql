@@ -1,50 +1,50 @@
 :root {
   color-scheme: dark;
   font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --bg-gradient: radial-gradient(120% 120% at 50% 0%, #121826 0%, #0b1120 45%, #05070d 100%);
-  --panel-bg: rgba(17, 25, 40, 0.75);
-  --panel-border: rgba(148, 163, 184, 0.2);
-  --accent: #38bdf8;
-  --accent-strong: #0ea5e9;
+  --bg-gradient: radial-gradient(120% 120% at 50% 0%, #1a1a1a 0%, #0f0f0f 45%, #000000 100%);
+  --panel-bg: rgba(30, 30, 30, 0.95);
+  --panel-border: rgba(160, 160, 160, 0.7);
+  --accent: #ffffff;
+  --accent-strong: #e5e5e5;
   --upstream: #a855f7;
   --downstream: #22c55e;
-  --node-default: #f8fafc;
-  --node-border: rgba(148, 163, 184, 0.4);
-  --text-strong: #f8fafc;
-  --text-muted: #94a3b8;
+  --node-default: #ffffff;
+  --node-border: rgba(140, 140, 140, 0.6);
+  --text-strong: #ffffff;
+  --text-muted: #b0b0b0;
   --warning: #f59e0b;
-  --card-bg: rgba(15, 23, 42, 0.88);
-  --card-border: rgba(148, 163, 184, 0.25);
-  --card-shadow: 0 24px 50px rgba(15, 23, 42, 0.45);
-  --card-shadow-drag: 0 28px 60px rgba(15, 23, 42, 0.55);
-  --card-header-start: rgba(2, 132, 199, 0.35);
-  --card-header-end: rgba(8, 47, 73, 0.85);
-  --card-header-text: #e0f2fe;
-  --column-border: rgba(148, 163, 184, 0.12);
-  --column-hover-bg: rgba(56, 189, 248, 0.12);
-  --column-hover-border: rgba(56, 189, 248, 0.65);
-  --column-name: #f1f5f9;
-  --column-meta: rgba(148, 163, 184, 0.75);
-  --column-selected-bg: rgba(56, 189, 248, 0.18);
-  --column-selected-border: #38bdf8;
-  --column-selected-outline: rgba(56, 189, 248, 0.35);
+  --card-bg: rgba(20, 20, 20, 0.95);
+  --card-border: rgba(120, 120, 120, 0.5);
+  --card-shadow: 0 24px 50px rgba(0, 0, 0, 0.6);
+  --card-shadow-drag: 0 28px 60px rgba(0, 0, 0, 0.8);
+  --card-header-start: rgba(80, 80, 80, 0.9);
+  --card-header-end: rgba(50, 50, 50, 0.95);
+  --card-header-text: #ffffff;
+  --column-border: rgba(160, 160, 160, 0.6);
+  --column-hover-bg: rgba(50, 50, 50, 0.3);
+  --column-hover-border: rgba(100, 100, 100, 0.6);
+  --column-name: #ffffff;
+  --column-meta: rgba(180, 180, 180, 0.8);
+  --column-selected-bg: rgba(70, 70, 70, 0.4);
+  --column-selected-border: #ffffff;
+  --column-selected-outline: rgba(255, 255, 255, 0.2);
   --column-upstream-bg: rgba(168, 85, 247, 0.18);
   --column-upstream-border: #c084fc;
   --column-downstream-bg: rgba(34, 197, 94, 0.2);
   --column-downstream-border: #4ade80;
   --column-search-outline: #f97316;
   --column-search-bg: rgba(249, 115, 22, 0.16);
-  --column-dot: rgba(148, 163, 184, 0.45);
-  --column-dot-glow: rgba(2, 132, 199, 0.25);
-  --inspector-block-bg: rgba(15, 23, 42, 0.82);
-  --inspector-block-border: rgba(148, 163, 184, 0.25);
-  --inspector-block-ring: rgba(15, 23, 42, 0.4);
-  --field-bg: rgba(15, 23, 42, 0.8);
-  --field-border: rgba(148, 163, 184, 0.25);
-  --field-placeholder: rgba(148, 163, 184, 0.6);
-  --message-info-bg: rgba(59, 130, 246, 0.12);
-  --message-info-border: rgba(59, 130, 246, 0.35);
-  --message-info-text: #bfdbfe;
+  --column-dot: rgba(120, 120, 120, 0.6);
+  --column-dot-glow: rgba(150, 150, 150, 0.3);
+  --inspector-block-bg: rgba(25, 25, 25, 0.9);
+  --inspector-block-border: rgba(60, 60, 60, 0.3);
+  --inspector-block-ring: rgba(40, 40, 40, 0.5);
+  --field-bg: rgba(15, 15, 15, 0.9);
+  --field-border: rgba(80, 80, 80, 0.4);
+  --field-placeholder: rgba(140, 140, 140, 0.6);
+  --message-info-bg: rgba(30, 30, 30, 0.9);
+  --message-info-border: rgba(100, 100, 100, 0.4);
+  --message-info-text: #ffffff;
   --message-success-bg: rgba(34, 197, 94, 0.14);
   --message-success-border: rgba(34, 197, 94, 0.35);
   --message-success-text: #bbf7d0;
@@ -54,8 +54,8 @@
   --message-error-bg: rgba(248, 113, 113, 0.16);
   --message-error-border: rgba(248, 113, 113, 0.45);
   --message-error-text: #fecaca;
-  --link-base: rgba(148, 163, 184, 0.65);
-  --link-selected: #38bdf8;
+  --link-base: rgba(140, 140, 140, 0.7);
+  --link-selected: #ffffff;
   --link-upstream: #c084fc;
   --link-downstream: #4ade80;
 }
@@ -215,23 +215,23 @@ button {
 }
 
 button.secondary {
-  background: rgba(56, 189, 248, 0.15);
-  border: 1px solid rgba(56, 189, 248, 0.35);
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.3);
 }
 
 button.secondary:hover {
-  background: rgba(56, 189, 248, 0.25);
+  background: rgba(255, 255, 255, 0.2);
   transform: translateY(-2px);
 }
 
 button.ghost {
-  background: rgba(148, 163, 184, 0.1);
-  border: 1px solid rgba(148, 163, 184, 0.25);
+  background: rgba(80, 80, 80, 0.3);
+  border: 1px solid rgba(120, 120, 120, 0.4);
   color: var(--text-muted);
 }
 
 button.ghost:hover {
-  background: rgba(148, 163, 184, 0.2);
+  background: rgba(100, 100, 100, 0.4);
   color: var(--text-strong);
 }
 
@@ -485,11 +485,17 @@ select {
   padding: 32px;
   min-height: 720px;
   overflow: auto;
+  cursor: grab;
+}
+
+#graphWrapper:active {
+  cursor: grabbing;
 }
 
 #cardsContainer {
   position: relative;
   z-index: 1;
+  transform-origin: 0 0;
 }
 
 .lineage-card {
@@ -647,6 +653,7 @@ select {
   inset: 0;
   z-index: 2;
   pointer-events: none;
+  transform-origin: 0 0;
 }
 
 .link-path {

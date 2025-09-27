@@ -14,7 +14,15 @@
     },
     columnCount: 0,
     warnings: [],
-    activeFilter: null
+    activeFilter: null,
+    zoom: 1.0,
+    panX: 0,
+    panY: 0,
+    isDragging: false,
+    dragStartX: 0,
+    dragStartY: 0,
+    lastPanX: 0,
+    lastPanY: 0
   };
 
   const refs = {
@@ -64,6 +72,78 @@
     initializeTheme();
     window.addEventListener("resize", resizeHandler);
     refs.graphWrapper.addEventListener("scroll", scrollHandler, { passive: true });
+    setupZoomAndPan();
+  }
+
+  function setupZoomAndPan() {
+    // Mouse wheel zoom
+    refs.graphWrapper.addEventListener("wheel", (event) => {
+      event.preventDefault();
+      const zoomFactor = event.deltaY > 0 ? 0.9 : 1.1;
+      zoomAt(zoomFactor, event.clientX, event.clientY);
+    }, { passive: false });
+
+    // Click and drag pan
+    refs.graphWrapper.addEventListener("mousedown", (event) => {
+      if (event.button !== 0) return; // Only left mouse button
+      state.isDragging = true;
+      state.dragStartX = event.clientX;
+      state.dragStartY = event.clientY;
+      state.lastPanX = state.panX;
+      state.lastPanY = state.panY;
+      refs.graphWrapper.style.cursor = "grabbing";
+      event.preventDefault();
+    });
+
+    document.addEventListener("mousemove", (event) => {
+      if (!state.isDragging) return;
+      const deltaX = event.clientX - state.dragStartX;
+      const deltaY = event.clientY - state.dragStartY;
+      state.panX = state.lastPanX + deltaX;
+      state.panY = state.lastPanY + deltaY;
+      applyTransformations();
+    });
+
+    document.addEventListener("mouseup", () => {
+      if (state.isDragging) {
+        state.isDragging = false;
+        refs.graphWrapper.style.cursor = "";
+      }
+    });
+  }
+
+  function zoomAt(factor, clientX, clientY) {
+    const rect = refs.graphWrapper.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+
+    // Zoom towards mouse position
+    const newZoom = Math.max(0.1, Math.min(5.0, state.zoom * factor));
+
+    // Calculate the world coordinates of the mouse
+    const worldX = (x - state.panX) / state.zoom;
+    const worldY = (y - state.panY) / state.zoom;
+
+    // Calculate new pan to keep mouse position fixed
+    state.panX = x - worldX * newZoom;
+    state.panY = y - worldY * newZoom;
+    state.zoom = newZoom;
+
+    applyTransformations();
+  }
+
+  function applyTransformations() {
+    const transform = `translate(${state.panX}px, ${state.panY}px) scale(${state.zoom})`;
+    refs.cardsContainer.style.transform = transform;
+    refs.connectionsLayer.style.transform = transform;
+    drawConnections();
+  }
+
+  function resetZoomAndPan() {
+    state.zoom = 0.8;
+    state.panX = 0;
+    state.panY = 0;
+    applyTransformations();
   }
 
   function attachListeners() {
@@ -720,21 +800,33 @@
       return;
     }
 
-  const wrapper = refs.graphWrapper;
-  const svg = refs.connectionsLayer;
-  const contentWidth = Math.max(wrapper.scrollWidth, wrapper.clientWidth, refs.cardsContainer.offsetWidth);
-  const contentHeight = Math.max(wrapper.scrollHeight, wrapper.clientHeight, refs.cardsContainer.offsetHeight);
-  svg.setAttribute("width", contentWidth);
-  svg.setAttribute("height", contentHeight);
-  svg.setAttribute("viewBox", `0 0 ${contentWidth} ${contentHeight}`);
+    const wrapper = refs.graphWrapper;
+    const svg = refs.connectionsLayer;
+    const contentWidth = Math.max(wrapper.scrollWidth, wrapper.clientWidth, refs.cardsContainer.offsetWidth);
+    const contentHeight = Math.max(wrapper.scrollHeight, wrapper.clientHeight, refs.cardsContainer.offsetHeight);
+    svg.setAttribute("width", contentWidth);
+    svg.setAttribute("height", contentHeight);
+    svg.setAttribute("viewBox", `0 0 ${contentWidth} ${contentHeight}`);
+
+    // Store existing highlight states before clearing
+    const existingHighlights = new Map();
+    const existingPaths = svg.querySelectorAll('.link-path');
+    existingPaths.forEach(path => {
+      const edgeId = path.dataset.edgeId;
+      const classes = Array.from(path.classList).filter(cls =>
+        cls === 'edge-selected' || cls === 'edge-upstream' || cls === 'edge-downstream' || cls === 'dimmed'
+      );
+      if (classes.length > 0) {
+        existingHighlights.set(edgeId, classes);
+      }
+    });
+
     svg.innerHTML = "";
 
     ensureArrowMarker(svg);
 
     const wrapperRect = wrapper.getBoundingClientRect();
-    const offsetX = wrapper.scrollLeft;
-    const offsetY = wrapper.scrollTop;
-  const edgeOffset = 6;
+    const edgeOffset = 6;
 
     state.edges.forEach((edge) => {
       if (state.activeFilter) {
@@ -743,25 +835,43 @@
           return;
         }
       }
+
+      // Get actual screen positions of column elements
       const sourceEl = getColumnElement(edge.source);
       const targetEl = getColumnElement(edge.target);
+
       if (!sourceEl || !targetEl) return;
 
       const sourceRect = sourceEl.getBoundingClientRect();
       const targetRect = targetEl.getBoundingClientRect();
 
-      const isSourceLeft = sourceRect.left <= targetRect.left;
-      const sourceY = sourceRect.top + sourceRect.height / 2 - wrapperRect.top + offsetY;
-      const targetY = targetRect.top + targetRect.height / 2 - wrapperRect.top + offsetY;
-      const sourceEdgeX = isSourceLeft
-        ? sourceRect.right - wrapperRect.left + offsetX
-        : sourceRect.left - wrapperRect.left + offsetX;
-      const targetEdgeX = isSourceLeft
-        ? targetRect.left - wrapperRect.left + offsetX
-        : targetRect.right - wrapperRect.left + offsetX;
+      // Calculate dot positions based on CSS
+      // Dots are at -13px from column row edges
+      const dotOffset = 13;
 
-      const sourceX = sourceEdgeX + (isSourceLeft ? edgeOffset : -edgeOffset);
-      const targetX = targetEdgeX + (isSourceLeft ? -edgeOffset : edgeOffset);
+      // Convert screen coordinates to SVG coordinate system
+      // Account for zoom and pan transformations
+      const sourceLeftDotX = (sourceRect.left - dotOffset - wrapperRect.left + wrapper.scrollLeft) / state.zoom - state.panX / state.zoom;
+      const sourceLeftDotY = (sourceRect.top + sourceRect.height / 2 - wrapperRect.top + wrapper.scrollTop) / state.zoom - state.panY / state.zoom;
+      const sourceRightDotX = (sourceRect.right + dotOffset - wrapperRect.left + wrapper.scrollLeft) / state.zoom - state.panX / state.zoom;
+      const sourceRightDotY = (sourceRect.top + sourceRect.height / 2 - wrapperRect.top + wrapper.scrollTop) / state.zoom - state.panY / state.zoom;
+
+      const targetLeftDotX = (targetRect.left - dotOffset - wrapperRect.left + wrapper.scrollLeft) / state.zoom - state.panX / state.zoom;
+      const targetLeftDotY = (targetRect.top + targetRect.height / 2 - wrapperRect.top + wrapper.scrollTop) / state.zoom - state.panY / state.zoom;
+      const targetRightDotX = (targetRect.right + dotOffset - wrapperRect.left + wrapper.scrollLeft) / state.zoom - state.panX / state.zoom;
+      const targetRightDotY = (targetRect.top + targetRect.height / 2 - wrapperRect.top + wrapper.scrollTop) / state.zoom - state.panY / state.zoom;
+
+      // Determine which dots to connect based on relative positions
+      const sourceCenterX = (sourceRect.left + sourceRect.width / 2 - wrapperRect.left + wrapper.scrollLeft) / state.zoom - state.panX / state.zoom;
+      const targetCenterX = (targetRect.left + targetRect.width / 2 - wrapperRect.left + wrapper.scrollLeft) / state.zoom - state.panX / state.zoom;
+
+      const isSourceLeft = sourceCenterX <= targetCenterX;
+
+      // Connect: source-right-dot to target-left-dot (most common case)
+      const sourceX = sourceRightDotX;
+      const sourceY = sourceRightDotY;
+      const targetX = targetLeftDotX;
+      const targetY = targetLeftDotY;
 
       const midpoint = (sourceX + targetX) / 2;
       const separation = Math.abs(targetX - sourceX);
@@ -774,10 +884,16 @@
       path.setAttribute("d", `M ${sourceX} ${sourceY} C ${control1X} ${sourceY}, ${control2X} ${targetY}, ${targetX} ${targetY}`);
       path.setAttribute("class", "link-path");
       path.setAttribute("data-edge-id", edge.id);
-    path.setAttribute("marker-end", "url(#arrowhead)");
-    path.addEventListener("click", () => highlightLink(edge.id));
-      svg.appendChild(path);
+      path.setAttribute("marker-end", "url(#arrowhead)");
+      path.addEventListener("click", () => highlightLink(edge.id));
 
+      // Restore highlight states if they existed before redraw
+      const highlightClasses = existingHighlights.get(edge.id);
+      if (highlightClasses) {
+        path.classList.add(...highlightClasses);
+      }
+
+      svg.appendChild(path);
     });
   }
 
@@ -949,6 +1065,7 @@
     resetInspector();
     refs.searchInput.value = "";
     clearFilter();
+    resetZoomAndPan();
     showMessage("", "info");
     drawConnections();
   }
@@ -1181,27 +1298,39 @@
       return;
     }
     showMessage("Rendering image…", "info");
-    const captureOptions = { backgroundColor: "#0b1120", scale: 2 };
-    const bounds = getVisibleBounds();
-    if (bounds) {
-      const padding = state.activeFilter ? 80 : 120;
-      const maxWidth = refs.graphWrapper.scrollWidth;
-      const maxHeight = refs.graphWrapper.scrollHeight;
-      const x = Math.max(bounds.left - padding, 0);
-      const y = Math.max(bounds.top - padding, 0);
-      const width = Math.max(Math.min(bounds.width + padding * 2, maxWidth), 320);
-      const height = Math.max(Math.min(bounds.height + padding * 2, maxHeight), 320);
-      Object.assign(captureOptions, {
-        x,
-        y,
-        width,
-        height,
-        scrollX: 0,
-        scrollY: 0
-      });
-    }
+
+    // Temporarily reset zoom and pan for capture
+    const originalZoom = state.zoom;
+    const originalPanX = state.panX;
+    const originalPanY = state.panY;
+
+    // Reset to default view for capture
+    state.zoom = 1.0;
+    state.panX = 0;
+    state.panY = 0;
+    applyTransformations();
+
+    // Force layout recalculation
+    refs.cardsContainer.offsetHeight;
+    refs.connectionsLayer.offsetHeight;
+
+    const captureOptions = {
+      backgroundColor: "#0b1120",
+      scale: 2,
+      useCORS: true,
+      allowTaint: true,
+      width: refs.cardsContainer.offsetWidth,
+      height: refs.cardsContainer.offsetHeight
+    };
+
     html2canvas(refs.graphWrapper, captureOptions)
       .then((canvas) => {
+        // Restore original zoom and pan
+        state.zoom = originalZoom;
+        state.panX = originalPanX;
+        state.panY = originalPanY;
+        applyTransformations();
+
         const link = document.createElement("a");
         link.download = `${slugify(currentFileName || "lineage-view")}.png`;
         link.href = canvas.toDataURL("image/png");
@@ -1209,6 +1338,12 @@
         showMessage("Download ready.", "success");
       })
       .catch((error) => {
+        // Restore original zoom and pan even if capture fails
+        state.zoom = originalZoom;
+        state.panX = originalPanX;
+        state.panY = originalPanY;
+        applyTransformations();
+
         console.error(error);
         showMessage("Unable to produce image snapshot.", "error");
       });
