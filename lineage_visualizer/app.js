@@ -768,30 +768,54 @@
     const cards = Array.from(refs.cardsContainer.querySelectorAll(".lineage-card"));
     if (!cards.length) return;
 
-  const minWidth = state.activeFilter
-    ? refs.graphWrapper.clientWidth
-    : parseFloat(refs.cardsContainer.dataset.minWidth || refs.graphWrapper.clientWidth);
-  const minHeight = state.activeFilter
-    ? refs.graphWrapper.clientHeight
-    : parseFloat(refs.cardsContainer.dataset.minHeight || refs.graphWrapper.clientHeight);
+    // When filtering is active, calculate bounds based on visible cards only
+    if (state.activeFilter) {
+      const visibleCards = cards.filter(card => !card.classList.contains("filtered-out") && card.offsetParent !== null);
+      if (!visibleCards.length) return;
 
-  let maxRight = minWidth;
-  let maxBottom = minHeight;
+      let minLeft = Infinity;
+      let minTop = Infinity;
+      let maxRight = -Infinity;
+      let maxBottom = -Infinity;
 
-    cards.forEach((card) => {
-      if (card.classList.contains("filtered-out") || card.offsetParent === null) {
-        return;
-      }
-      const left = parseFloat(card.style.left || "0");
-      const top = parseFloat(card.style.top || "0");
-      const right = left + card.offsetWidth;
-      const bottom = top + card.offsetHeight;
-      if (right > maxRight) maxRight = right;
-      if (bottom > maxBottom) maxBottom = bottom;
-    });
+      visibleCards.forEach((card) => {
+        const left = parseFloat(card.style.left || "0");
+        const top = parseFloat(card.style.top || "0");
+        const right = left + card.offsetWidth;
+        const bottom = top + card.offsetHeight;
 
-    refs.cardsContainer.style.width = `${Math.max(maxRight + 120, minWidth)}px`;
-    refs.cardsContainer.style.height = `${Math.max(maxBottom + 160, minHeight)}px`;
+        if (left < minLeft) minLeft = left;
+        if (top < minTop) minTop = top;
+        if (right > maxRight) maxRight = right;
+        if (bottom > maxBottom) maxBottom = bottom;
+      });
+
+      const padding = 120;
+      refs.cardsContainer.style.width = `${maxRight - minLeft + padding}px`;
+      refs.cardsContainer.style.height = `${maxBottom - minTop + padding}px`;
+    } else {
+      // Original logic for when no filter is active
+      const minWidth = parseFloat(refs.cardsContainer.dataset.minWidth || refs.graphWrapper.clientWidth);
+      const minHeight = parseFloat(refs.cardsContainer.dataset.minHeight || refs.graphWrapper.clientHeight);
+
+      let maxRight = minWidth;
+      let maxBottom = minHeight;
+
+      cards.forEach((card) => {
+        if (card.classList.contains("filtered-out") || card.offsetParent === null) {
+          return;
+        }
+        const left = parseFloat(card.style.left || "0");
+        const top = parseFloat(card.style.top || "0");
+        const right = left + card.offsetWidth;
+        const bottom = top + card.offsetHeight;
+        if (right > maxRight) maxRight = right;
+        if (bottom > maxBottom) maxBottom = bottom;
+      });
+
+      refs.cardsContainer.style.width = `${Math.max(maxRight + 120, minWidth)}px`;
+      refs.cardsContainer.style.height = `${Math.max(maxBottom + 160, minHeight)}px`;
+    }
   }
 
   function drawConnections() {
