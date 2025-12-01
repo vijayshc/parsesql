@@ -265,6 +265,7 @@ class LineageExtractor:
                                 file=file,
                                 engine=self.engine,
                                 source_path=origin.path,
+                                lineage_type="SELECT",
                             )
                         )
                 # Extract JOIN and WHERE conditions
@@ -293,6 +294,7 @@ class LineageExtractor:
                                 file=file,
                                 engine=self.engine,
                                 source_path=origin.path,
+                                lineage_type="WHERE",
                             )
                         )
                 
@@ -407,6 +409,7 @@ class LineageExtractor:
                         file=file,
                         engine=self.engine,
                         source_path=origin.path,
+                        lineage_type="SELECT",
                     )
                 )
         
@@ -426,6 +429,7 @@ class LineageExtractor:
                         file=file,
                         engine=self.engine,
                         source_path=origin.path,
+                        lineage_type="WHERE",
                     )
                 )
 
@@ -516,6 +520,7 @@ class LineageExtractor:
                             file=file,
                             engine=self.engine,
                             source_path=origin.path,
+                            lineage_type="WHERE",
                         )
                     )
             
@@ -590,6 +595,7 @@ class LineageExtractor:
                         file=None,
                         engine=self.engine,
                         source_path=origin.path,
+                        lineage_type="SELECT",
                     ))
         return rows
 
@@ -661,6 +667,7 @@ class LineageExtractor:
                     target_table=target_table,
                     file=file,
                     engine=self.engine,
+                    lineage_type="SELECT",
                 ))
         # TODO: Extract WHERE from UPDATE statement if present
         return {'lineage': rows, 'joins': [], 'wheres': []}
@@ -727,6 +734,7 @@ class LineageExtractor:
                                     target_table=target_table,
                                     file=file,
                                     engine=self.engine,
+                                    lineage_type="SELECT",
                                 ))
                     # INSERT clause lineage (VALUES columns) mapping index-wise
                     elif isinstance(then_expr, exp.Insert) and target_table:
@@ -769,6 +777,7 @@ class LineageExtractor:
                                     target_table=target_table,
                                     file=file,
                                     engine=self.engine,
+                                    lineage_type="SELECT",
                                 ))
         # For insert mapping ensure target_table set
         # Rebuild rows with target_table set (immutable dataclass)
@@ -783,6 +792,7 @@ class LineageExtractor:
                 file=file,
                 engine=self.engine,
                 source_path=r.source_path,
+                lineage_type=r.lineage_type,
             ))
         rows = updated
         # TODO: Extract JOIN/ON from MERGE statement

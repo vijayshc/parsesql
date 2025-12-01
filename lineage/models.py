@@ -14,6 +14,7 @@ class LineageRecord:
     file: Optional[str] = None
     engine: Optional[str] = None
     source_path: tuple[str, ...] = ()  # Path of CTEs/Tables traversed
+    lineage_type: str = "SELECT"  # 'SELECT' or 'WHERE'
 
     def as_csv_row(self) -> List[str]:
         return [
@@ -23,6 +24,7 @@ class LineageRecord:
             self.target_column or "",
             self.target_table or "",
             self.file or "",
+            self.lineage_type,
         ]
 
 
@@ -58,6 +60,7 @@ CSV_HEADER = [
     "target_column",
     "target_table",
     "file",
+    "lineage_type",
 ]
 
 JOIN_CSV_HEADER = [

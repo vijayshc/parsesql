@@ -791,6 +791,12 @@ class SelectAnalyzer:
             if not any(o.table or o.column for o in origins):
                 origins = [ColumnOrigin(table=None, column=None)]
             
+            # Find the condition expression in the WHERE clause
+            condition_expr = col
+            while condition_expr.parent and not isinstance(condition_expr.parent, (exp.Where, exp.And, exp.Or)):
+                 condition_expr = condition_expr.parent
+            condition_sql = expr_sql(condition_expr, self.dialect)
+
             # Update expression chains
             current_expr_sql = expr_sql(col, self.dialect)
             enhanced_origins = []
@@ -802,6 +808,12 @@ class SelectAnalyzer:
                 else:
                     new_chain = origin.expression_chain
                 
+                # Append condition_sql if different from current chain end
+                if condition_sql and condition_sql != current_expr_sql:
+                     # Avoid duplicating if condition_sql is already at the end (unlikely but safe)
+                     if not new_chain.endswith(condition_sql):
+                         new_chain = f"{new_chain}~{condition_sql}"
+                
                 enhanced_origins.append(ColumnOrigin(
                     table=origin.table,
                     column=origin.column,
@@ -811,7 +823,7 @@ class SelectAnalyzer:
             
             # Output column is the column name itself
             lineages.append(ExpressionLineage(
-                expression_sql=current_expr_sql, 
+                expression_sql=condition_sql or current_expr_sql, 
                 output_column=col_name, 
                 origins=tuple(enhanced_origins)
             ))
