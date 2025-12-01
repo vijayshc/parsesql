@@ -13,6 +13,7 @@ class LineageRecord:
     target_table: Optional[str]
     file: Optional[str] = None
     engine: Optional[str] = None
+    source_path: tuple[str, ...] = ()  # Path of CTEs/Tables traversed
 
     def as_csv_row(self) -> List[str]:
         return [
@@ -50,27 +51,6 @@ class JoinConditionRecord:
         ]
 
 
-@dataclass(frozen=True)
-class WhereConditionRecord:
-    """Represents a WHERE clause condition from CTEs/subqueries affecting output."""
-    table_name: Optional[str]
-    column_name: Optional[str]
-    condition_expression: str
-    file: Optional[str] = None
-    query_level: int = 0  # Track nesting depth
-    source_cte: Optional[str] = None  # Track which CTE/subquery this where belongs to
-
-    def as_csv_row(self) -> List[str]:
-        return [
-            self.table_name or "",
-            self.column_name or "",
-            self.condition_expression or "",
-            self.file or "",
-            str(self.query_level),
-            self.source_cte or "",
-        ]
-
-
 CSV_HEADER = [
     "source_table",
     "source_column",
@@ -85,15 +65,6 @@ JOIN_CSV_HEADER = [
     "left_table",
     "right_table",
     "join_type",
-    "condition_expression",
-    "file",
-    "query_level",
-    "source_cte",
-]
-
-WHERE_CSV_HEADER = [
-    "table_name",
-    "column_name",
     "condition_expression",
     "file",
     "query_level",

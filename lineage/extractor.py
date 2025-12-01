@@ -65,14 +65,14 @@ class LineageExtractor:
         - 'joins': List[JoinConditionRecord]  
         - 'wheres': List[WhereConditionRecord]
         """
-        from .models import JoinConditionRecord, WhereConditionRecord
+        from .models import JoinConditionRecord
         
         with open(path, 'r', encoding='utf-8') as f:
             sql_text = f.read()
         statements = self._parse(sql_text)
         all_rows: List[LineageRecord] = []
         all_joins: List[JoinConditionRecord] = []
-        all_wheres: List[WhereConditionRecord] = []
+        all_wheres: List = []
         
         # Maintain a per-file mutable schema overlay (copy base) to allow CTAS created tables to be visible to later statements.
         original_schema = self.schema
@@ -107,9 +107,61 @@ class LineageExtractor:
                 pass
         # Restore original schema reference (defensive, though extractor instance per invocation)
         self.schema = original_schema
+
+        # Remap joins to final target columns based on lineage path
+        from .models import JoinConditionRecord
+        
+        # Group raw joins by source_cte
+        joins_by_cte = {}
+        for j in all_joins:
+            key = j.source_cte
+            if key not in joins_by_cte:
+                joins_by_cte[key] = []
+            joins_by_cte[key].append(j)
+            
+        remapped_joins = []
+        seen_remapped = set()
+        
+        # Include top-level joins (source_cte=None) as they are already mapped to target
+        for j in all_joins:
+            if j.source_cte is None:
+                 key = (j.target_column, j.left_table, j.right_table, j.condition_expression, j.source_cte)
+                 if key not in seen_remapped:
+                     seen_remapped.add(key)
+                     remapped_joins.append(j)
+
+        for r in all_rows:
+            target_col = r.target_column
+            if not target_col:
+                continue
+                
+            # Traverse path to find upstream joins
+            path_ctes = list(r.source_path)
+            
+            for cte in path_ctes:
+                if cte in joins_by_cte:
+                    for j in joins_by_cte[cte]:
+                        # Deduplication key
+                        key = (target_col, j.left_table, j.right_table, j.condition_expression, j.source_cte)
+                        if key in seen_remapped:
+                            continue
+                        seen_remapped.add(key)
+                        
+                        new_j = JoinConditionRecord(
+                            target_column=target_col,
+                            left_table=j.left_table,
+                            right_table=j.right_table,
+                            join_type=j.join_type,
+                            condition_expression=j.condition_expression,
+                            file=j.file,
+                            query_level=j.query_level,
+                            source_cte=j.source_cte
+                        )
+                        remapped_joins.append(new_j)
+        
         return {
             'lineage': all_rows,
-            'joins': all_joins,
+            'joins': remapped_joins,
             'wheres': all_wheres,
         }
 
@@ -126,7 +178,7 @@ class LineageExtractor:
         
         Returns dict with keys: 'lineage', 'joins', 'wheres'
         """
-        from .models import JoinConditionRecord, WhereConditionRecord
+        from .models import JoinConditionRecord
         # WITH wrapper (support WITH on any statement type including INSERT/UPDATE/MERGE)
         env = AnalysisEnvironment(ctes={})
         core_stmt = stmt
@@ -145,7 +197,7 @@ class LineageExtractor:
                 inner = cte.this
                 # Register only SELECT/UNION CTEs; others ignored but name reserved for potential future extension
                 if isinstance(inner, (exp.Select, exp.Union)):
-                    env.register(name, SelectSource(inner, env, self.schema))
+                    env.register(name, SelectSource(inner, env, self.schema, name=name))
             if isinstance(stmt, exp.With):
                 core_stmt = stmt.this
             else:
@@ -174,7 +226,7 @@ class LineageExtractor:
                         inner = cte.this
                         # Register only SELECT/UNION CTEs
                         if isinstance(inner, (exp.Select, exp.Union)):
-                            ctas_env.register(name, SelectSource(inner, ctas_env, self.schema))
+                            ctas_env.register(name, SelectSource(inner, ctas_env, self.schema, name=name))
                 
                 analyzer = SelectAnalyzer(expression, ctas_env, self.schema, self.engine)
                 expr_lineages = analyzer.analyze()
@@ -212,11 +264,12 @@ class LineageExtractor:
                                 target_table=target_table,
                                 file=file,
                                 engine=self.engine,
+                                source_path=origin.path,
                             )
                         )
                 # Extract JOIN and WHERE conditions
+                # Extract JOIN and WHERE conditions
                 joins = analyzer.extract_join_conditions(query_level=0, source_cte=None)
-                wheres = analyzer.extract_where_conditions(query_level=0, source_cte=None)
                 join_records = [
                     JoinConditionRecord(
                         target_column=j[0], left_table=j[1], right_table=j[2],
@@ -224,13 +277,26 @@ class LineageExtractor:
                         source_cte=None
                     ) for j in joins
                 ]
-                where_records = [
-                    WhereConditionRecord(
-                        table_name=w[0], column_name=w[1], condition_expression=w[2],
-                        file=file, query_level=0, source_cte=None
-                    ) for w in wheres
-                ]
-                return {'lineage': rows, 'joins':join_records, 'wheres': where_records}
+                
+                # Extract WHERE clause lineage
+                where_lineages = analyzer.analyze_where()
+                for el in where_lineages:
+                    tgt_col = el.output_column
+                    for origin in el.origins:
+                        rows.append(
+                            LineageRecord(
+                                source_table=origin.table,
+                                source_column=origin.column,
+                                expression=origin.expression_chain or el.expression_sql,
+                                target_column=tgt_col,
+                                target_table=target_table,
+                                file=file,
+                                engine=self.engine,
+                                source_path=origin.path,
+                            )
+                        )
+                
+                return {'lineage': rows, 'joins':join_records, 'wheres': []}
 
         # INSERT target handling
         target_table = None
@@ -267,8 +333,20 @@ class LineageExtractor:
         if not isinstance(select_part, (exp.Select, exp.Union)):
             return {'lineage': [], 'joins': [], 'wheres': []}
 
-        analyzer = SelectAnalyzer(select_part, env, self.schema, self.engine)
-        expr_lineages = analyzer.analyze()
+        # Analyze SELECT/UNION
+        expr_lineages = []
+        # Use a main analyzer for WHERE/JOIN extraction (handles UNION recursion internally)
+        main_analyzer = SelectAnalyzer(select_part, env, self.schema, self.engine)
+        
+        if isinstance(select_part, exp.Union):
+             # Handle UNION at top level by splitting parts to capture all aliases (e.g. dd and dd1)
+             parts = main_analyzer._select_parts(select_part)
+             for part in parts:
+                 part_analyzer = SelectAnalyzer(part, env, self.schema, self.engine)
+                 expr_lineages.extend(part_analyzer.analyze())
+        else:
+             expr_lineages = main_analyzer.analyze()
+
         # If INSERT without explicit target columns: apply positional or name-based mapping using target schema
         if target_table and not target_cols:
             target_schema_cols = list(self.schema.columns(target_table))
@@ -328,8 +406,29 @@ class LineageExtractor:
                         target_table=target_table,
                         file=file,
                         engine=self.engine,
+                        source_path=origin.path,
                     )
                 )
+        
+        # Extract WHERE clause lineage from top-level and append to rows BEFORE deduplication
+        where_lineages = main_analyzer.analyze_where()
+        for el in where_lineages:
+            # Use output_column (which is the column name from WHERE clause) as target_column
+            tgt_col = el.output_column
+            for origin in el.origins:
+                rows.append(
+                    LineageRecord(
+                        source_table=origin.table,
+                        source_column=origin.column,
+                        expression=origin.expression_chain or el.expression_sql,
+                        target_column=tgt_col,
+                        target_table=target_table, # Keep same target table context
+                        file=file,
+                        engine=self.engine,
+                        source_path=origin.path,
+                    )
+                )
+
         # Deduplicate identical full lineage rows (source_table, source_column, target_table, target_column, expression)
         seen_target = set()
         deduped: List[LineageRecord] = []
@@ -365,20 +464,11 @@ class LineageExtractor:
                 final_filtered.extend(concretes)
             else:
                 final_filtered.extend(items)
-        # Secondary collapse: for duplicate target_column mapping to same source_table/source_column keep first
-        final: List[LineageRecord] = []
-        collapse_seen = set()
-        for r in final_filtered:
-            if r.target_column:
-                ckey = (r.source_table, r.source_column, r.target_table, r.target_column)
-                if ckey in collapse_seen:
-                    continue
-                collapse_seen.add(ckey)
-            final.append(r)
         
-        # Extract JOIN and WHERE conditions from top-level
-        joins = analyzer.extract_join_conditions(query_level=0, source_cte=None)
-        wheres = analyzer.extract_where_conditions(query_level=0, source_cte=None)
+        final = final_filtered
+        
+        # Extract JOIN conditions from top-level
+        joins = main_analyzer.extract_join_conditions(query_level=0, source_cte=None)
         join_records = [
             JoinConditionRecord(
                 target_column=j[0], left_table=j[1], right_table=j[2],
@@ -386,13 +476,7 @@ class LineageExtractor:
                 source_cte=None
             ) for j in joins
         ]
-        where_records = [
-            WhereConditionRecord(
-                table_name=w[0], column_name=w[1], condition_expression=w[2],
-                file=file, query_level=0, source_cte=None
-            ) for w in wheres
-        ]
-        
+
         # Recursively extract from ALL SelectSources (CTEs and inline subqueries)
         # Track processed sources to avoid duplicates
         processed_sources = set()
@@ -408,7 +492,6 @@ class LineageExtractor:
             # Extract from this SelectSource
             sub_analyzer = SelectAnalyzer(select_src.select, select_src.env, self.schema, self.engine)
             sub_joins = sub_analyzer.extract_join_conditions(query_level=depth, source_cte=source_name)
-            sub_wheres = sub_analyzer.extract_where_conditions(query_level=depth, source_cte=source_name)
             
             join_records.extend([
                 JoinConditionRecord(
@@ -417,19 +500,31 @@ class LineageExtractor:
                     source_cte=source_name
                 ) for j in sub_joins
             ])
-            where_records.extend([
-                WhereConditionRecord(
-                    table_name=w[0], column_name=w[1], condition_expression=w[2],
-                    file=file, query_level=depth, source_cte=source_name
-                ) for w in sub_wheres
-            ])
+            
+            # Extract WHERE clause lineage from CTE/subquery
+            sub_where_lineages = sub_analyzer.analyze_where()
+            for el in sub_where_lineages:
+                tgt_col = el.output_column
+                for origin in el.origins:
+                    final.append(
+                        LineageRecord(
+                            source_table=origin.table,
+                            source_column=origin.column,
+                            expression=origin.expression_chain or el.expression_sql,
+                            target_column=tgt_col,
+                            target_table=source_name, # Use CTE name as target table for CTE WHEREs
+                            file=file,
+                            engine=self.engine,
+                            source_path=origin.path,
+                        )
+                    )
             
             # Recursively process sources within this SelectSource
             sources = sub_analyzer._build_sources(select_src.select if isinstance(select_src.select, exp.Select) else select_src.select)
             for alias, src in sources:
                 if isinstance(src, SelectSource):
                     # Inline subquery - process it
-                    extract_from_select_source(src, depth + 1, None)
+                    extract_from_select_source(src, depth + 1, source_name)
         
         # Extract from CTEs
         for cte_name, cte_source in env.ctes.items():
@@ -438,7 +533,7 @@ class LineageExtractor:
         
         # Extract from inline subqueries in FROM clause (non-CTE SelectSources)
         if isinstance(select_part, exp.Select):
-            sources = analyzer._build_sources(select_part)
+            sources = main_analyzer._build_sources(select_part)
             for alias, src in sources:
                 if isinstance(src, SelectSource):
                     # Check if this is NOT a CTE (CTEs are already processed above)
@@ -448,7 +543,7 @@ class LineageExtractor:
                         extract_from_select_source(src, 1, None)
         elif isinstance(select_part, exp.Union):
             # For UNION, process both sides for inline subqueries
-            parts = analyzer._select_parts(select_part)
+            parts = main_analyzer._select_parts(select_part)
             for part in parts:
                 if isinstance(part, exp.Select):
                     # Create analyzer for this UNION branch
@@ -459,7 +554,7 @@ class LineageExtractor:
                             if not is_cte:
                                 extract_from_select_source(src, 1, None)
         
-        return {'lineage': final, 'joins': join_records, 'wheres': where_records}
+        return {'lineage': final, 'joins': join_records, 'wheres': []}
 
     # unreachable due to return above
 
@@ -494,6 +589,7 @@ class LineageExtractor:
                         target_table=None,
                         file=None,
                         engine=self.engine,
+                        source_path=origin.path,
                     ))
         return rows
 
@@ -686,6 +782,7 @@ class LineageExtractor:
                 target_table=r.target_table or target_table,
                 file=file,
                 engine=self.engine,
+                source_path=r.source_path,
             ))
         rows = updated
         # TODO: Extract JOIN/ON from MERGE statement

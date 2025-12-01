@@ -116,7 +116,8 @@ class SelectAnalyzer:
                 enhanced_origins.append(ColumnOrigin(
                     table=origin.table,
                     column=origin.column,
-                    expression_chain=new_chain
+                    expression_chain=new_chain,
+                    path=origin.path
                 ))
             
             lineages.append(ExpressionLineage(expression_sql=current_expr_sql, output_column=out_col, origins=tuple(enhanced_origins)))
@@ -701,6 +702,8 @@ class SelectAnalyzer:
                 for origin in el.origins:
                     if origin.table:
                         column_tables.add(origin.table)
+                    if origin.path:
+                        column_tables.update(origin.path)
                 
                # For aggregated columns with no table reference (None.None),
                 # they still depend on ALL tables in the FROM/JOIN
@@ -742,97 +745,82 @@ class SelectAnalyzer:
         
         return join_records
     
-    def extract_where_conditions(self, query_level: int = 0, source_cte: Optional[str] = None) -> List[Tuple]:
+    def analyze_where(self) -> List[ExpressionLineage]:
         """
-        Extract WHERE clause conditions from CTEs/subqueries that affect the output.
-        Only extracts WHERE clauses from nested queries, not top-level WHERE.
-        Returns list of (table_name, column_name, expression)
+        Analyze WHERE clause expressions to produce lineage for columns used in filtering.
+        Returns list of ExpressionLineage objects, treating WHERE clause columns as targets.
         """
-        from ..models import WhereConditionRecord
-        
-        if not isinstance(self.select, exp.Select):
+        if isinstance(self.select, exp.Union):
             # Handle UNION by recursively extracting from each branch
-            if isinstance(self.select, exp.Union):
-                results = []
-                parts = self._select_parts(self.select)
-                for part in parts:
-                    analyzer = SelectAnalyzer(part, self.env, self.schema, self.dialect)
-                    results.extend(analyzer.extract_where_conditions(query_level, source_cte))
-                return results
+            results = []
+            parts = self._select_parts(self.select)
+            for part in parts:
+                analyzer = SelectAnalyzer(part, self.env, self.schema, self.dialect)
+                results.extend(analyzer.analyze_where())
+            return results
+            
+        if not isinstance(self.select, exp.Select):
             return []
         
-        where_records = []
-        
-        # Only extract WHERE if we're inside a CTE/subquery (query_level > 0 or source_cte is set)
-        if query_level > 0 or source_cte:
-            sources = self._build_sources(self.select)
-            where_clause = self.select.args.get("where")
-            
-            if where_clause:
-                # Get the full WHERE expression as SQL
-                where_sql = expr_sql(where_clause.this, self.dialect)
-                
-                # Extract all columns from the WHERE clause
-                columns_in_where = list(where_clause.find_all(exp.Column))
-                
-                # Resolve each column to its actual table
-                seen_combinations = set()
-                for col in columns_in_where:
-                    col_name = _norm(col.name)
-                    actual_table = None
-                    
-                    if col.table:
-                        # Qualified column - resolve alias to actual table
-                        alias = _norm(col.table)
-                        for src_alias, src in sources:
-                            if src_alias == alias:
-                                if isinstance(src, TableSource):
-                                    actual_table = src.table_name
-                                elif isinstance(src, SelectSource):
-                                    # Resolve to CTE name or base table
-                                    cte_name = None
-                                    for env_cte_name, env_cte_src in self.env.ctes.items():
-                                        if env_cte_src is src:
-                                            cte_name = env_cte_name
-                                            break
-                                    
-                                    if cte_name:
-                                        actual_table = cte_name
-                                    else:
-                                        # Try to resolve to base table
-                                        try:
-                                            sub_analyzer = SelectAnalyzer(src.select, src.env, self.schema, self.dialect)
-                                            sub_sources = sub_analyzer._build_sources(src.select if isinstance(src.select, exp.Select) else src.select)
-                                            base_tables = []
-                                            for _, sub_src in sub_sources:
-                                                if isinstance(sub_src, TableSource):
-                                                    base_tables.append(sub_src.table_name)
-                                            if len(base_tables) == 1:
-                                                actual_table = base_tables[0]
-                                            else:
-                                                actual_table = alias
-                                        except:
-                                            actual_table = alias
-                                break
-                    else:
-                        # Unqualified - try to determine from sources
-                        resolved = self._resolve_column(col, sources)
-                        if resolved and len(resolved) > 0:
-                            actual_table = resolved[0].table
-                    
-                    # Avoid duplicates
-                    combo = (actual_table, col_name)
-                    if combo not in seen_combinations:
-                        seen_combinations.add(combo)
-                        where_records.append((actual_table, col_name, where_sql))
-        
-        # Also check for subqueries in WHERE (nested)
         where_clause = self.select.args.get("where")
-        if where_clause:
-            subqueries_in_where = list(where_clause.find_all(exp.Select))
-            for subq in subqueries_in_where:
-                # Recursively extract WHERE conditions from subqueries
-                sub_analyzer = SelectAnalyzer(subq, self.env, self.schema, self.dialect)
-                where_records.extend(sub_analyzer.extract_where_conditions(query_level + 1, source_cte))
+        if not where_clause:
+            return []
+            
+        sources = self._build_sources(self.select)
+        lineages: List[ExpressionLineage] = []
         
-        return where_records
+        # Extract all columns from the WHERE clause
+        columns_in_where = list(where_clause.find_all(exp.Column))
+        
+        # Deduplicate columns by name to avoid redundant analysis
+        seen_columns = set()
+        unique_columns = []
+        for col in columns_in_where:
+            col_name = _norm(col.name)
+            # Use full column representation for uniqueness (table.col)
+            full_name = f"{col.table}.{col.name}" if col.table else col_name
+            if full_name not in seen_columns:
+                seen_columns.add(full_name)
+                unique_columns.append(col)
+        
+        for col in unique_columns:
+            col_name = _norm(col.name)
+            origins = self._origins_for_expression(col, sources)
+            
+            # If column expression with no resolved origins, attach placeholder
+            if not any(o.table or o.column for o in origins):
+                origins = [ColumnOrigin(table=None, column=None)]
+            
+            # Update expression chains
+            current_expr_sql = expr_sql(col, self.dialect)
+            enhanced_origins = []
+            for origin in origins:
+                if origin.expression_chain and current_expr_sql != origin.expression_chain:
+                    new_chain = f"{origin.expression_chain}~{current_expr_sql}"
+                elif current_expr_sql:
+                    new_chain = current_expr_sql
+                else:
+                    new_chain = origin.expression_chain
+                
+                enhanced_origins.append(ColumnOrigin(
+                    table=origin.table,
+                    column=origin.column,
+                    expression_chain=new_chain,
+                    path=origin.path
+                ))
+            
+            # Output column is the column name itself
+            lineages.append(ExpressionLineage(
+                expression_sql=current_expr_sql, 
+                output_column=col_name, 
+                origins=tuple(enhanced_origins)
+            ))
+            
+        # Also check for subqueries in WHERE (nested)
+        subqueries_in_where = list(where_clause.find_all(exp.Select))
+        for subq in subqueries_in_where:
+            # Recursively extract WHERE conditions from subqueries
+            sub_analyzer = SelectAnalyzer(subq, self.env, self.schema, self.dialect)
+            lineages.extend(sub_analyzer.analyze_where())
+            
+        return lineages

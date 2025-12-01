@@ -8,7 +8,7 @@ from typing import List
 
 from lineage.extractor import LineageExtractor
 from lineage.logger import get_logger
-from lineage.models import CSV_HEADER, LineageRecord, JOIN_CSV_HEADER, JoinConditionRecord, WHERE_CSV_HEADER, WhereConditionRecord
+from lineage.models import CSV_HEADER, LineageRecord, JOIN_CSV_HEADER, JoinConditionRecord
 
 
 def find_sql_files(folder: str) -> List[str]:
@@ -32,12 +32,7 @@ def write_join_csv(path: str, rows: List[JoinConditionRecord]) -> None:
 			writer.writerow(r.as_csv_row())
 
 
-def write_where_csv(path: str, rows: List[WhereConditionRecord]) -> None:
-	with open(path, "w", encoding="utf-8", newline="") as f:
-		writer = csv.writer(f)
-		writer.writerow(WHERE_CSV_HEADER)
-		for r in rows:
-			writer.writerow(r.as_csv_row())
+
 
 
 def main() -> int:
@@ -58,11 +53,7 @@ def main() -> int:
 		default="join_conditions.csv",
 		help="Path to output CSV file for JOIN conditions",
 	)
-	parser.add_argument(
-		"--where-output",
-		default="where_conditions.csv",
-		help="Path to output CSV file for WHERE clauses",
-	)
+
 	parser.add_argument(
 		"--log-level", default=os.getenv("LOG_LEVEL", "INFO"), help="Logging level"
 	)
@@ -156,7 +147,6 @@ def main() -> int:
 	engines = [e.strip() for e in args.engines.split(",") if e.strip()]
 	all_records: List[LineageRecord] = []
 	all_joins: List[JoinConditionRecord] = []
-	all_wheres: List[WhereConditionRecord] = []
 
 	for path in sql_files:
 		# Load schema for this file if exists
@@ -183,7 +173,6 @@ def main() -> int:
 				results = extractor.extract_from_file(path)
 				all_records.extend(results['lineage'])
 				all_joins.extend(results['joins'])
-				all_wheres.extend(results['wheres'])
 				logger.info(f"Successfully parsed {path} with engine {eng}")
 				parsed = True
 				break
@@ -206,8 +195,8 @@ def main() -> int:
 	write_join_csv(args.join_output, all_joins)
 	logger.info(f"Wrote JOIN conditions to {args.join_output} with {len(all_joins)} rows")
 	
-	write_where_csv(args.where_output, all_wheres)
-	logger.info(f"Wrote WHERE conditions to {args.where_output} with {len(all_wheres)} rows")
+	write_join_csv(args.join_output, all_joins)
+	logger.info(f"Wrote JOIN conditions to {args.join_output} with {len(all_joins)} rows")
 	
 	return 0
 

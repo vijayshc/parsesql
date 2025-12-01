@@ -10,9 +10,10 @@ class ColumnOrigin:
     table: Optional[str]
     column: Optional[str]
     expression_chain: Optional[str] = None  # Full expression path separated by ~
+    path: tuple[str, ...] = ()  # Path of CTEs/Tables traversed
 
     def as_key(self) -> tuple:
-        return (self.table, self.column, self.expression_chain)
+        return (self.table, self.column, self.expression_chain, self.path)
 
 
 @dataclass(frozen=True)

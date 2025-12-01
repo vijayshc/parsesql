@@ -37,14 +37,14 @@ class TableSource(SourceBase):
         if table_columns:
             # Table is in schema - only return column if it exists in schema
             if normalized_name in [_norm(col) for col in table_columns]:
-                return [ColumnOrigin(table=self.table_name, column=normalized_name, expression_chain=normalized_name)]
+                return [ColumnOrigin(table=self.table_name, column=normalized_name, expression_chain=normalized_name, path=(self.table_name,))]
             else:
                 # Table exists in schema but column doesn't - return empty
                 return []
         else:
             # Table not in schema - conservatively assume it might have the column
             # This preserves backward compatibility but allows for better disambiguation
-            return [ColumnOrigin(table=self.table_name, column=normalized_name, expression_chain=normalized_name)]
+            return [ColumnOrigin(table=self.table_name, column=normalized_name, expression_chain=normalized_name, path=(self.table_name,))]
 
 
 @dataclass
@@ -53,6 +53,7 @@ class SelectSource(SourceBase):
     select: exp.Expression  # Select or Union
     env: 'AnalysisEnvironment'  # environment for nested CTE resolution
     schema: Schema
+    name: Optional[str] = None
     _outputs_cache: Optional[List[str]] = field(default=None, init=False)
     _lineage_index: Optional[Dict[str, List[ColumnOrigin]]] = field(default=None, init=False)
 
@@ -140,35 +141,46 @@ class SelectSource(SourceBase):
         
         # First try: check if column exists in the SelectSource output
         result = list(self._lineage_index.get(n, []))
-        if result:
-            return result
         
-        # Demand-driven resolution for star expansion from unknown schema tables
-        # When a SelectSource contains a * from an unknown table and a specific column is requested,
-        # we can infer that the column comes from the star expansion if it's the only source
+        if not result:
+            # Demand-driven resolution for star expansion from unknown schema tables
+            # When a SelectSource contains a * from an unknown table and a specific column is requested,
+            # we can infer that the column comes from the star expansion if it's the only source
+            
+            # Re-analyze to check for demand-responsive star expansions
+            from .analyzer import SelectAnalyzer
+            analyzer = SelectAnalyzer(self.select, self.env, self.schema)
+            expr_lineages = analyzer.analyze()
+            
+            # Look for star expansion lineages that can handle this column request
+            for el in expr_lineages:
+                if (el.expression_sql == '*' and 
+                    not el.output_column and  # Demand-driven (no specific output)
+                    el.origins and 
+                    len(el.origins) == 1 and 
+                    el.origins[0].column == '*'):
+                    
+                    # This is a demand-responsive star expansion
+                    # We can infer the requested column comes from this source
+                    table_name = el.origins[0].table
+                    if table_name:
+                        result = [ColumnOrigin(table=table_name, column=name, expression_chain=name, path=(table_name,))]
+                        break
         
-        # Re-analyze to check for demand-responsive star expansions
-        from .analyzer import SelectAnalyzer
-        analyzer = SelectAnalyzer(self.select, self.env, self.schema)
-        expr_lineages = analyzer.analyze()
-        
-        # Look for star expansion lineages that can handle this column request
-        for el in expr_lineages:
-            if (el.expression_sql == '*' and 
-                not el.output_column and  # Demand-driven (no specific output)
-                el.origins and 
-                len(el.origins) == 1 and 
-                el.origins[0].column == '*'):
-                
-                # This is a demand-responsive star expansion
-                # We can infer the requested column comes from this source
-                table_name = el.origins[0].table
-                if table_name:
-                    return [ColumnOrigin(table=table_name, column=name, expression_chain=name)]
-        
-        # For SelectSource (CTE/Subquery), only expose explicitly selected columns
-        # Do not allow any fallback inference that could lead to false positives
-        return []
+        if result and self.name:
+            # Prepend current CTE name to path
+            new_result = []
+            for o in result:
+                new_path = (self.name,) + o.path
+                new_result.append(ColumnOrigin(
+                    table=o.table,
+                    column=o.column,
+                    expression_chain=o.expression_chain,
+                    path=new_path
+                ))
+            return new_result
+            
+        return result
     
     def _has_star_expansion(self) -> bool:
         """Check if this SelectSource has a * expansion that couldn't be resolved."""
