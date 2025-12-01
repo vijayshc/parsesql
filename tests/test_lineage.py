@@ -27,7 +27,9 @@ def _extract(sql: str, schema=SCHEMA):
     os.makedirs(os.path.dirname(tmp_file), exist_ok=True)
     with open(tmp_file, 'w', encoding='utf-8') as f:
         f.write(sql)
-    return extractor.extract_from_file(tmp_file)
+    results = extractor.extract_from_file(tmp_file)
+    # Return just the lineage records for backward compatibility
+    return results['lineage']
 
 
 def _triples(recs):
@@ -51,7 +53,8 @@ def _quads(recs):
 def test_cte_star_expansion_customers_orders():
     path = os.path.join(BASE_DIR, 'sql', 'test_new.sql')
     extractor = LineageExtractor(engine='spark', schema=SCHEMA)
-    records = extractor.extract_from_file(path)
+    results = extractor.extract_from_file(path)
+    records = results['lineage']
     
     # The SQL uses unknown base tables (customersx, orders1) so origins will be unresolved
     # But we should validate the target table mapping (INSERT INTO orders)

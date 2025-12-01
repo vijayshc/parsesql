@@ -587,3 +587,252 @@ class SelectAnalyzer:
                 return False
         
         return False
+    
+    def extract_join_conditions(self, query_level: int = 0, source_cte: Optional[str] = None) -> List[Tuple]:
+        """
+        Extract JOIN conditions from the SELECT statement.
+        Returns list of (target_column, left_table, right_table, join_type, expression)
+        One record per target column that depends on joined tables.
+        """
+        from ..models import JoinConditionRecord
+        
+        if not isinstance(self.select, exp.Select):
+            # Handle UNION by recursively extracting from each branch
+            if isinstance(self.select, exp.Union):
+                results = []
+                parts = self._select_parts(self.select)
+                for part in parts:
+                    analyzer = SelectAnalyzer(part, self.env, self.schema, self.dialect)
+                    results.extend(analyzer.extract_join_conditions(query_level, source_cte))
+                return results
+            return []
+        
+        sources = self._build_sources(self.select)
+        joins_list = self.select.args.get("joins") or []
+        
+        if not joins_list:
+            return []
+        
+        # Get lineage to understand which target columns exist
+        lineages = self.analyze()
+        
+        # Find all unique tables referenced in the output
+        all_tables_in_output = set()
+        for el in lineages:
+            for origin in el.origins:
+                if origin.table:
+                    all_tables_in_output.add(origin.table)
+        
+        # If no tables or no JOINs, no meaningful JOINs to report
+        # Note: We keep this even for single table (self-joins)
+        if len(all_tables_in_output) == 0:
+            return []
+        
+        join_records = []
+        
+        # Process each JOIN
+        for join_node in joins_list:
+            # Determine join type
+            join_type = "INNER"
+            if isinstance(join_node, exp.Join):
+                if join_node.args.get("side"):
+                    join_type = str(join_node.args["side"]).upper()
+                if join_node.args.get("kind"):
+                    kind = str(join_node.args["kind"]).upper()
+                    if kind in ("LEFT", "RIGHT", "FULL", "CROSS"):
+                        join_type = kind
+            
+            # Get the ON condition
+            on_condition = join_node.args.get("on")
+            if not on_condition:
+                continue
+            
+            # Get the full condition expression as SQL
+            condition_sql = expr_sql(on_condition, self.dialect)
+            
+            # Find tables involved in this JOIN condition
+            columns_in_condition = list(on_condition.find_all(exp.Column))
+            join_tables = set()
+            
+            for col in columns_in_condition:
+                if col.table:
+                    alias = _norm(col.table)
+                    for src_alias, src in sources:
+                        if src_alias == alias:
+                            if isinstance(src, TableSource):
+                                join_tables.add(src.table_name)
+                            elif isinstance(src, SelectSource):
+                                # Resolve to CTE name or base table
+                                cte_name = None
+                                for env_cte_name, env_cte_src in self.env.ctes.items():
+                                    if env_cte_src is src:
+                                        cte_name = env_cte_name
+                                        break
+                                
+                                if cte_name:
+                                    join_tables.add(cte_name)
+                                else:
+                                    # Try to resolve to base table
+                                    try:
+                                        sub_analyzer = SelectAnalyzer(src.select, src.env, self.schema, self.dialect)
+                                        sub_sources = sub_analyzer._build_sources(src.select if isinstance(src.select, exp.Select) else src.select)
+                                        base_tables = []
+                                        for _, sub_src in sub_sources:
+                                            if isinstance(sub_src, TableSource):
+                                                base_tables.append(sub_src.table_name)
+                                        if len(base_tables) == 1:
+                                            join_tables.add(base_tables[0])
+                                        else:
+                                            join_tables.add(alias)
+                                    except:
+                                        join_tables.add(alias)
+                            break
+            
+            # For each output column that comes from any table in this JOIN
+            # NOTE: For aggregated columns (COUNT, SUM, etc.) the lineage may show None.None
+            # but they still depend on the tables in the FROM/JOIN clauses
+            for el in lineages:
+                target_col = el.output_column
+                if not target_col:
+                    continue
+                
+                # Check if this column uses any table involved in this JOIN
+                column_tables = set()
+                for origin in el.origins:
+                    if origin.table:
+                        column_tables.add(origin.table)
+                
+               # For aggregated columns with no table reference (None.None),
+                # they still depend on ALL tables in the FROM/JOIN
+                has_table_ref = len(column_tables) > 0
+                
+                # Create JOIN record if:
+                # 1. Column references tables in this JOIN, OR
+                # 2. Column has no table reference (aggregated) and this is a JOIN query
+                should_record = False
+                if has_table_ref:
+                    # Regular column - check if it uses tables from this JOIN
+                    if join_tables.intersection(column_tables):
+                        should_record = True
+                else:
+                    # Aggregated column (None.None) - it depends on all joined tables
+                    should_record = True
+                
+                if should_record:
+                    join_table_list = sorted(list(join_tables))
+                    if len(join_table_list) >= 2:
+                        # Normal join with 2 different tables
+                        join_records.append((
+                            target_col,
+                            join_table_list[0],
+                            join_table_list[1],
+                            join_type,
+                            condition_sql
+                        ))
+                    elif len(join_table_list) == 1 and len(joins_list) > 0:
+                        # Self-join: same table on both sides
+                        table = join_table_list[0]
+                        join_records.append((
+                            target_col,
+                            table,
+                            table,
+                            join_type,
+                            condition_sql
+                        ))
+        
+        return join_records
+    
+    def extract_where_conditions(self, query_level: int = 0, source_cte: Optional[str] = None) -> List[Tuple]:
+        """
+        Extract WHERE clause conditions from CTEs/subqueries that affect the output.
+        Only extracts WHERE clauses from nested queries, not top-level WHERE.
+        Returns list of (table_name, column_name, expression)
+        """
+        from ..models import WhereConditionRecord
+        
+        if not isinstance(self.select, exp.Select):
+            # Handle UNION by recursively extracting from each branch
+            if isinstance(self.select, exp.Union):
+                results = []
+                parts = self._select_parts(self.select)
+                for part in parts:
+                    analyzer = SelectAnalyzer(part, self.env, self.schema, self.dialect)
+                    results.extend(analyzer.extract_where_conditions(query_level, source_cte))
+                return results
+            return []
+        
+        where_records = []
+        
+        # Only extract WHERE if we're inside a CTE/subquery (query_level > 0 or source_cte is set)
+        if query_level > 0 or source_cte:
+            sources = self._build_sources(self.select)
+            where_clause = self.select.args.get("where")
+            
+            if where_clause:
+                # Get the full WHERE expression as SQL
+                where_sql = expr_sql(where_clause.this, self.dialect)
+                
+                # Extract all columns from the WHERE clause
+                columns_in_where = list(where_clause.find_all(exp.Column))
+                
+                # Resolve each column to its actual table
+                seen_combinations = set()
+                for col in columns_in_where:
+                    col_name = _norm(col.name)
+                    actual_table = None
+                    
+                    if col.table:
+                        # Qualified column - resolve alias to actual table
+                        alias = _norm(col.table)
+                        for src_alias, src in sources:
+                            if src_alias == alias:
+                                if isinstance(src, TableSource):
+                                    actual_table = src.table_name
+                                elif isinstance(src, SelectSource):
+                                    # Resolve to CTE name or base table
+                                    cte_name = None
+                                    for env_cte_name, env_cte_src in self.env.ctes.items():
+                                        if env_cte_src is src:
+                                            cte_name = env_cte_name
+                                            break
+                                    
+                                    if cte_name:
+                                        actual_table = cte_name
+                                    else:
+                                        # Try to resolve to base table
+                                        try:
+                                            sub_analyzer = SelectAnalyzer(src.select, src.env, self.schema, self.dialect)
+                                            sub_sources = sub_analyzer._build_sources(src.select if isinstance(src.select, exp.Select) else src.select)
+                                            base_tables = []
+                                            for _, sub_src in sub_sources:
+                                                if isinstance(sub_src, TableSource):
+                                                    base_tables.append(sub_src.table_name)
+                                            if len(base_tables) == 1:
+                                                actual_table = base_tables[0]
+                                            else:
+                                                actual_table = alias
+                                        except:
+                                            actual_table = alias
+                                break
+                    else:
+                        # Unqualified - try to determine from sources
+                        resolved = self._resolve_column(col, sources)
+                        if resolved and len(resolved) > 0:
+                            actual_table = resolved[0].table
+                    
+                    # Avoid duplicates
+                    combo = (actual_table, col_name)
+                    if combo not in seen_combinations:
+                        seen_combinations.add(combo)
+                        where_records.append((actual_table, col_name, where_sql))
+        
+        # Also check for subqueries in WHERE (nested)
+        where_clause = self.select.args.get("where")
+        if where_clause:
+            subqueries_in_where = list(where_clause.find_all(exp.Select))
+            for subq in subqueries_in_where:
+                # Recursively extract WHERE conditions from subqueries
+                sub_analyzer = SelectAnalyzer(subq, self.env, self.schema, self.dialect)
+                where_records.extend(sub_analyzer.extract_where_conditions(query_level + 1, source_cte))
+        
+        return where_records

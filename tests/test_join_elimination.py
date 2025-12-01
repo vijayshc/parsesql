@@ -17,7 +17,8 @@ def _extract(sql: str):
     os.makedirs(os.path.dirname(tmp_file), exist_ok=True)
     with open(tmp_file, 'w', encoding='utf-8') as f:
         f.write(sql)
-    return extractor.extract_from_file(tmp_file)
+    results = extractor.extract_from_file(tmp_file)
+    return results['lineage']  # Return only lineage for backward compatibility
 
 def _triples(recs):
     return {(r.target_column, r.source_table, r.source_column) for r in recs}
