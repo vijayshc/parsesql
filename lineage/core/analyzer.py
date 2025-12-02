@@ -331,13 +331,7 @@ class SelectAnalyzer:
             for col, items in by_col.items():
                 concrete = [i for i in items if i.table]
                 if concrete:
-                    # keep only concrete
-                    # deduplicate tables
-                    seen_tbl = set()
-                    for c in concrete:
-                        if c.table not in seen_tbl:
-                            seen_tbl.add(c.table)
-                            cleaned.append(c)
+                    cleaned.extend(concrete)
                 else:
                     cleaned.extend(items)
             dedup = cleaned
