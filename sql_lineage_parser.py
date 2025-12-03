@@ -139,6 +139,12 @@ def main() -> int:
 			except Exception as e:
 				logger.warning(f"Could not load global schema.json: {e}")
 
+	# Load parameters from parameter.csv if it exists
+	from lineage.utils import load_parameters
+	parameters = load_parameters("parameter.csv")
+	if parameters:
+		logger.info(f"Loaded {len(parameters)} parameters from parameter.csv")
+
 	sql_files = find_sql_files(args.sql_folder)
 	if not sql_files:
 		logger.error(f"No SQL files found in {args.sql_folder}")
@@ -169,7 +175,7 @@ def main() -> int:
 		parsed = False
 		for eng in engines:
 			try:
-				extractor = LineageExtractor(engine=eng, schema=file_schema, logger=logger)
+				extractor = LineageExtractor(engine=eng, schema=file_schema, logger=logger, parameters=parameters)
 				results = extractor.extract_from_file(path)
 				all_records.extend(results['lineage'])
 				all_joins.extend(results['joins'])
