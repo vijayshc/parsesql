@@ -51,10 +51,11 @@ class LineageExtractor:
     4. Emit LineageRecord rows
     """
 
-    def __init__(self, engine: str = "spark", schema: Optional[Dict[str, List[str]]] = None, logger: Optional[logging.Logger] = None):
+    def __init__(self, engine: str = "spark", schema: Optional[Dict[str, List[str]]] = None, logger: Optional[logging.Logger] = None, parameters: Optional[Dict[str, str]] = None):
         self.engine = engine.lower()
         self.schema = Schema(_flatten_schema(schema or {}))
         self.logger = logger or get_logger(level=os.getenv("LOG_LEVEL", "INFO"))
+        self.parameters = parameters or {}
 
     # --------------- public API ---------------
     def extract_from_file(self, path: str) -> Dict[str, List]:
@@ -69,6 +70,11 @@ class LineageExtractor:
         
         with open(path, 'r', encoding='utf-8') as f:
             sql_text = f.read()
+
+        if self.parameters:
+            from .utils import substitute_parameters
+            sql_text = substitute_parameters(sql_text, self.parameters)
+
         statements = self._parse(sql_text)
         all_rows: List[LineageRecord] = []
         all_joins: List[JoinConditionRecord] = []

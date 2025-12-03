@@ -1,8 +1,31 @@
 from __future__ import annotations
 
+import csv
+import os
 from typing import Dict, Iterable, Optional, Sequence
 
 from sqlglot import expressions as exp
+
+
+def load_parameters(path: str) -> Dict[str, str]:
+    params = {}
+    if not os.path.exists(path):
+        return params
+    with open(path, 'r', encoding='utf-8') as f:
+        reader = csv.reader(f)
+        header = next(reader, None)
+        if header:
+            for row in reader:
+                if len(row) >= 2:
+                    params[row[0].strip()] = row[1].strip()
+    return params
+
+
+def substitute_parameters(sql_text: str, params: Dict[str, str]) -> str:
+    for key, value in params.items():
+        placeholder = f"${{{key}}}"
+        sql_text = sql_text.replace(placeholder, value)
+    return sql_text
 
 
 def normalize_identifier(name: Optional[str]) -> Optional[str]:
