@@ -37,10 +37,11 @@ class LineageStep:
     ultimate_target_column: str
     level_top_to_bottom: int
     level_bottom_to_top: int
+    file: str = ""
     
     def to_csv_row(self) -> str:
         """Convert to CSV row format."""
-        return f"{self.source_table},{self.source_column},{self.expression},{self.target_table},{self.target_column},{self.ultimate_source_table},{self.ultimate_source_column},{self.ultimate_target_table},{self.ultimate_target_column},{self.level_top_to_bottom},{self.level_bottom_to_top}"
+        return f"{self.source_table},{self.source_column},{self.expression},{self.target_table},{self.target_column},{self.ultimate_source_table},{self.ultimate_source_column},{self.ultimate_target_table},{self.ultimate_target_column},{self.level_top_to_bottom},{self.level_bottom_to_top},{self.file}"
 
 
 class LineageChainProcessor:
@@ -49,8 +50,8 @@ class LineageChainProcessor:
     def __init__(self, csv_file: str):
         self.csv_file = csv_file
         self.records: List[LineageRecord] = []
-        # Map (table, column) -> List[(source_table, source_column, expression)]
-        self.lineage_map: Dict[Tuple[str, str], List[Tuple[str, str, str]]] = defaultdict(list)
+        # Map (table, column) -> List[(source_table, source_column, expression, file)]
+        self.lineage_map: Dict[Tuple[str, str], List[Tuple[str, str, str, str]]] = defaultdict(list)
         # Map (target_table, target_column) -> expression for that step
         self.expression_map: Dict[Tuple[str, str], str] = {}
         self.created_tables: Set[str] = set()  # Tables created by scripts
@@ -61,6 +62,13 @@ class LineageChainProcessor:
         with open(self.csv_file, 'r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
             for row in reader:
+                # Filter for trace_level 0 (summary row) if trace_level exists in CSV
+                # Older CSVs might not have trace_level, so we default to processing if missing
+                if 'trace_level' in row and row['trace_level'] != '0':
+                    continue
+                if 'lineage_type' in row and row['lineage_type'] != 'SELECT':
+                    continue
+                    
                 record = LineageRecord(
                     source_table=row['source_table'].strip() if row['source_table'] else '',
                     source_column=row['source_column'].strip() if row['source_column'] else '',
@@ -85,25 +93,24 @@ class LineageChainProcessor:
                 
             # Map target to its sources with expression
             target_key = (record.target_table, record.target_column)
-            source_key = (record.source_table, record.source_column, record.expression)
+            source_key = (record.source_table, record.source_column, record.expression, record.file)
             
             # Store expression for this target
             self.expression_map[target_key] = record.expression
             
-            # Only add non-empty sources
-            if record.source_table or record.source_column:
-                self.lineage_map[target_key].append(source_key)
+            # Add to lineage map regardless of source emptiness (e.g. literals or unknown sources)
+            self.lineage_map[target_key].append(source_key)
             
             # Track base tables (tables that are used as sources but never created)
             if record.source_table and record.source_table not in self.created_tables:
                 self.base_tables.add(record.source_table)
     
-    def trace_lineage_chain(self, target_table: str, target_column: str, visited: Optional[Set[Tuple[str, str]]] = None) -> List[List[Tuple[str, str, str]]]:
+    def trace_lineage_chain(self, target_table: str, target_column: str, visited: Optional[Set[Tuple[str, str]]] = None) -> List[List[Tuple[str, str, str, str]]]:
         """
         Trace lineage chain for a target column.
         Returns list of complete paths from base tables to the target.
         Uses robust cycle detection to prevent infinite recursion.
-        Each path item is (table, column, expression)
+        Each path item is (table, column, expression, file)
         """
         if visited is None:
             visited = set()
@@ -126,36 +133,45 @@ class LineageChainProcessor:
             if not target_table or target_table in self.base_tables:
                 # Get expression for this target, or use column name as default
                 expression = self.expression_map.get(target_key, target_column or '')
-                return [[(target_table, target_column, expression)]]
+                # Note: file is unknown here since we are at leaf/base, so empty string or from upstream?
+                # Actually, for chain reconstruction, the file is associated with the edge coming INTO this node.
+                # But at the very start of a chain (base table), there's no incoming edge.
+                return [[(target_table, target_column, expression, "")]]
             return []
         
         all_paths = []
-        for source_table, source_column, source_expression in sources:
-            # Skip completely empty sources
-            if not source_table and not source_column:
-                continue
-                
+        for source_table, source_column, source_expression, source_file in sources:
             source_key = (source_table, source_column)
             
             # Additional cycle check: don't revisit nodes we've seen in current path
             if source_key in visited:
                 print(f"WARNING: Potential cycle from {target_key} to {source_key}, skipping")
                 continue
-                
-            if source_table in self.base_tables:
-                # Found base table - this is the start of the chain
+            
+            # If source is empty OR it's a known base table, treat as leaf/start
+            if (not source_table and not source_column) or source_table in self.base_tables:
+                # Found base table or literal source - this is the start of the chain
                 target_expression = self.expression_map.get(target_key, target_column or '')
-                path = [(source_table, source_column, source_expression), 
-                       (target_table, target_column, target_expression)]
+                path = [(source_table, source_column, source_expression, ""), 
+                       (target_table, target_column, target_expression, source_file)]
                 all_paths.append(path)
             else:
                 # Recursively trace upstream with current visited set
                 upstream_paths = self.trace_lineage_chain(source_table, source_column, visited.copy())
-                for upstream_path in upstream_paths:
-                    # Extend path with current target
+                
+                if not upstream_paths:
+                    # If this is a created table but we found no upstream lineage (e.g. literal INSERTs),
+                    # treat it as a start node for this chain segment to avoid dropping the downstream part.
                     target_expression = self.expression_map.get(target_key, target_column or '')
-                    complete_path = upstream_path + [(target_table, target_column, target_expression)]
-                    all_paths.append(complete_path)
+                    path = [(source_table, source_column, source_expression, ""), 
+                           (target_table, target_column, target_expression, source_file)]
+                    all_paths.append(path)
+                else:
+                    for upstream_path in upstream_paths:
+                        # Extend path with current target
+                        target_expression = self.expression_map.get(target_key, target_column or '')
+                        complete_path = upstream_path + [(target_table, target_column, target_expression, source_file)]
+                        all_paths.append(complete_path)
         
         visited.remove(target_key)
         return all_paths
@@ -193,23 +209,23 @@ class LineageChainProcessor:
         
         return final_outputs
     
-    def create_lineage_steps(self, chain: List[Tuple[str, str, str]]) -> List[LineageStep]:
+    def create_lineage_steps(self, chain: List[Tuple[str, str, str, str]]) -> List[LineageStep]:
         """
         Convert a lineage chain into LineageStep objects with proper level numbering.
-        Each chain item is (table, column, expression)
+        Each chain item is (table, column, expression, file)
         """
         if len(chain) < 2:
             return []
         
         steps = []
         total_levels = len(chain)
-        ultimate_source_table, ultimate_source_column, _ = chain[0]
-        ultimate_target_table, ultimate_target_column, _ = chain[-1]
+        ultimate_source_table, ultimate_source_column, _, _ = chain[0]
+        ultimate_target_table, ultimate_target_column, _, _ = chain[-1]
         
         # Create steps for each adjacent pair in the chain
         for i in range(len(chain) - 1):
-            source_table, source_column, source_expression = chain[i]
-            target_table, target_column, target_expression = chain[i + 1]
+            source_table, source_column, source_expression, _ = chain[i]
+            target_table, target_column, target_expression, target_file = chain[i + 1]
             
             step = LineageStep(
                 source_table=source_table,
@@ -222,7 +238,8 @@ class LineageChainProcessor:
                 ultimate_target_table=ultimate_target_table,
                 ultimate_target_column=ultimate_target_column,
                 level_top_to_bottom=i + 1,  # 1-based indexing from top
-                level_bottom_to_top=total_levels - i - 1  # Count from bottom
+                level_bottom_to_top=total_levels - i - 1,  # Count from bottom
+                file=target_file # The file where this specific transformation (edge) occurred
             )
             steps.append(step)
         
@@ -257,7 +274,7 @@ class LineageChainProcessor:
         # Check all nodes for cycles
         all_nodes = set(self.lineage_map.keys())
         for source_list in self.lineage_map.values():
-            for source_table, source_column, _ in source_list:
+            for source_table, source_column, _, _ in source_list:
                 all_nodes.add((source_table, source_column))
         
         for node in all_nodes:
@@ -306,7 +323,7 @@ class LineageChainProcessor:
         """Write lineage steps to output file."""
         with open(output_file, 'w', encoding='utf-8') as f:
             # Write header
-            f.write("source_table,source_column,expression,target_table,target_column,ultimate_source_table,ultimate_source_column,ultimate_target_table,ultimate_target_column,level_top_to_bottom,level_bottom_to_top\n")
+            f.write("source_table,source_column,expression,target_table,target_column,ultimate_source_table,ultimate_source_column,ultimate_target_table,ultimate_target_column,level_top_to_bottom,level_bottom_to_top,file\n")
             
             # Write steps
             for step in steps:

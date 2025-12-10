@@ -12,6 +12,7 @@ from .models import LineageRecord
 from .core.schema import Schema, _norm
 from .core.sources import AnalysisEnvironment, SelectSource, TableSource
 from .core.analyzer import SelectAnalyzer, expr_sql
+from .core.origin import TraceStep
 
 
 def _flatten_schema(raw: Dict) -> Dict[str, List[str]]:
@@ -265,7 +266,7 @@ class LineageExtractor:
                             LineageRecord(
                                 source_table=origin.table,
                                 source_column=origin.column,
-                                expression=origin.expression_chain or el.expression_sql,
+                                trace=origin.trace or (TraceStep(el.expression_sql),),
                                 target_column=tgt_col,
                                 target_table=target_table,
                                 file=file,
@@ -294,7 +295,7 @@ class LineageExtractor:
                             LineageRecord(
                                 source_table=origin.table,
                                 source_column=origin.column,
-                                expression=origin.expression_chain or el.expression_sql,
+                                trace=origin.trace or (TraceStep(el.expression_sql),),
                                 target_column=tgt_col,
                                 target_table=target_table,
                                 file=file,
@@ -409,7 +410,7 @@ class LineageExtractor:
                     LineageRecord(
                         source_table=origin.table,
                         source_column=source_column,
-                        expression=origin.expression_chain or el.expression_sql,
+                        trace=origin.trace or (TraceStep(el.expression_sql),),
                         target_column=target_col,
                         target_table=target_table,
                         file=file,
@@ -429,7 +430,7 @@ class LineageExtractor:
                     LineageRecord(
                         source_table=origin.table,
                         source_column=origin.column,
-                        expression=origin.expression_chain or el.expression_sql,
+                        trace=origin.trace or (TraceStep(el.expression_sql),),
                         target_column=tgt_col,
                         target_table=target_table, # Keep same target table context
                         file=file,
@@ -443,7 +444,7 @@ class LineageExtractor:
         seen_target = set()
         deduped: List[LineageRecord] = []
         for r in rows:
-            key = (r.source_table, r.source_column, r.target_table, r.target_column, r.expression)
+            key = (r.source_table, r.source_column, r.target_table, r.target_column, r.trace)
             if key in seen_target:
                 continue
             seen_target.add(key)
@@ -451,7 +452,7 @@ class LineageExtractor:
         # Remove placeholder None origins when concrete origin for same target/expression exists
         grouped = {}
         for r in deduped:
-            gkey = (r.target_table, r.target_column, r.expression)
+            gkey = (r.target_table, r.target_column, r.trace)
             grouped.setdefault(gkey, []).append(r)
         filtered: List[LineageRecord] = []
         for gkey, items in grouped.items():
@@ -520,7 +521,7 @@ class LineageExtractor:
                         LineageRecord(
                             source_table=origin.table,
                             source_column=origin.column,
-                            expression=origin.expression_chain or el.expression_sql,
+                            trace=origin.trace or (TraceStep(el.expression_sql),),
                             target_column=tgt_col,
                             target_table=source_name, # Use CTE name as target table for CTE WHEREs
                             file=file,
@@ -595,7 +596,7 @@ class LineageExtractor:
                     rows.append(LineageRecord(
                         source_table=origin.table,
                         source_column=origin.column,
-                        expression=el.expression_sql,
+                        trace=(TraceStep(el.expression_sql),),
                         target_column=None,
                         target_table=None,
                         file=None,
@@ -668,7 +669,7 @@ class LineageExtractor:
                 rows.append(LineageRecord(
                     source_table=tbl,
                     source_column=col,
-                    expression=expr_sql(right, self.engine),
+                    trace=(TraceStep(expr_sql(right, self.engine)),),
                     target_column=target_col,
                     target_table=target_table,
                     file=file,
@@ -735,7 +736,7 @@ class LineageExtractor:
                                 rows.append(LineageRecord(
                                     source_table=resolved_table,
                                     source_column=oc,
-                                    expression=expr_sql(right, self.engine),
+                                    trace=(TraceStep(expr_sql(right, self.engine)),),
                                     target_column=tgt_col,
                                     target_table=target_table,
                                     file=file,
@@ -778,7 +779,7 @@ class LineageExtractor:
                                 rows.append(LineageRecord(
                                     source_table=resolved_table,
                                     source_column=oc,
-                                    expression=expr_sql(ve, self.engine),
+                                    trace=(TraceStep(expr_sql(ve, self.engine)),),
                                     target_column=tgt_col,
                                     target_table=target_table,
                                     file=file,
@@ -792,7 +793,7 @@ class LineageExtractor:
             updated.append(LineageRecord(
                 source_table=r.source_table,
                 source_column=r.source_column,
-                expression=r.expression,
+                trace=r.trace,
                 target_column=r.target_column,
                 target_table=r.target_table or target_table,
                 file=file,

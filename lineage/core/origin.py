@@ -5,15 +5,24 @@ from typing import Optional
 
 
 @dataclass(frozen=True)
+class TraceStep:
+    expression: str
+    alias: Optional[str] = None
+
+    def __repr__(self):
+        return f"{self.expression} (as {self.alias})" if self.alias else self.expression
+
+
+@dataclass(frozen=True)
 class ColumnOrigin:
     """Represents a physical source table & column for lineage."""
     table: Optional[str]
     column: Optional[str]
-    expression_chain: Optional[str] = None  # Full expression path separated by ~
+    trace: tuple[TraceStep, ...] = ()  # Ordered list of expression usage
     path: tuple[str, ...] = ()  # Path of CTEs/Tables traversed
 
     def as_key(self) -> tuple:
-        return (self.table, self.column, self.expression_chain, self.path)
+        return (self.table, self.column, self.trace, self.path)
 
 
 @dataclass(frozen=True)

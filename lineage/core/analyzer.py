@@ -5,7 +5,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 from sqlglot import expressions as exp
 
-from .origin import ColumnOrigin, ExpressionLineage
+from .origin import ColumnOrigin, ExpressionLineage, TraceStep
 from .schema import Schema, _norm
 from .sources import AnalysisEnvironment, SourceBase, TableSource, SelectSource
 
@@ -103,20 +103,36 @@ class SelectAnalyzer:
             
             # Update expression chains to include current expression
             current_expr_sql = expr_sql(expr, self.dialect)
+            # Capture alias if present
+            local_alias = _norm(str(proj.alias)) if isinstance(proj, exp.Alias) else None
+            
             enhanced_origins = []
             for origin in origins:
                 # Build expression chain (source -> target flow)
-                if origin.expression_chain and current_expr_sql != origin.expression_chain:
-                    new_chain = f"{origin.expression_chain}~{current_expr_sql}"
-                elif current_expr_sql:
-                    new_chain = current_expr_sql
+                new_step = TraceStep(expression=current_expr_sql, alias=local_alias)
+                # Avoid duplicating the last step if it's identical (e.g. simple pass-through)
+                # But here we are projecting, so it's a new layer.
+                # However, if current_expr_sql is same as last step expression and alias is None, maybe skip?
+                # User complaint: "expressions traces are delimited by ~. Instead, want to capture each of the exceptions"
+                # If we have `SELECT col AS col`, we might have step `col` then step `col` (alias col).
+                # Only if strictly identical?
+                # For now, just append. But existing logic had:
+                # if origin.expression_chain and current_expr_sql != origin.expression_chain: ...
+                
+                # Check if this step is redundant (same expression as last step, no new alias)
+                if origin.trace:
+                    last = origin.trace[-1]
+                    if last.expression == current_expr_sql and not local_alias:
+                        new_trace = origin.trace
+                    else:
+                        new_trace = origin.trace + (new_step,)
                 else:
-                    new_chain = origin.expression_chain
+                    new_trace = (new_step,)
                 
                 enhanced_origins.append(ColumnOrigin(
                     table=origin.table,
                     column=origin.column,
-                    expression_chain=new_chain,
+                    trace=new_trace,
                     path=origin.path
                 ))
             
@@ -245,7 +261,7 @@ class SelectAnalyzer:
                     origins.append(ExpressionLineage(
                         expression_sql='*', 
                         output_column=None,  # No specific output column - demand-driven
-                        origins=(ColumnOrigin(table=table_name, column='*', expression_chain='*'),)
+                        origins=(ColumnOrigin(table=table_name, column='*', trace=(TraceStep('*'),)),)
                     ))
                     continue
                 # Skip columns we've already seen (first occurrence wins)
@@ -386,8 +402,17 @@ class SelectAnalyzer:
                     return r or [ColumnOrigin(table=None, column=name)]
             return [ColumnOrigin(table=None, column=name)]
         # unqualified
+        # unqualified
         if len(sources) == 1:
-            return sources[0][1].resolve_column(name)
+            res = sources[0][1].resolve_column(name)
+            if not res:
+                # Fallback for single source: even if schema validation fails (column not in schema),
+                # force attribution to this source. This handles incomplete schemas or implied columns.
+                src = sources[0][1]
+                table_name = getattr(src, 'table_name', None)
+                if table_name:
+                    return [ColumnOrigin(table=table_name, column=name, trace=(TraceStep(name),), path=(table_name,))]
+            return res
         # multi-source disambiguation via schema
         candidate_tables = []
         for _, src in sources:
@@ -395,7 +420,7 @@ class SelectAnalyzer:
                 candidate_tables.append(src.table_name)
         unique_hits = [t for t in candidate_tables if name in self.schema.columns(t)]
         if len(unique_hits) == 1:
-            return [ColumnOrigin(table=unique_hits[0], column=name, expression_chain=name)]
+            return [ColumnOrigin(table=unique_hits[0], column=name, trace=(TraceStep(name),))]
         # Prefix-based inference (TPC-DS style)
         prefix_map = {
             'ss_': 'store_sales',
@@ -411,7 +436,7 @@ class SelectAnalyzer:
         for pref, table in sorted(prefix_map.items(), key=lambda x: -len(x[0])):
             if name.startswith(pref) and any(t.endswith(table) or t == table for t in candidate_tables):
                 # Accept prefix inference only if table participates in sources
-                return [ColumnOrigin(table=table, column=name, expression_chain=name)]
+                return [ColumnOrigin(table=table, column=name, trace=(TraceStep(name),))]
         # Enhanced scope-aware resolution with strict unknown table handling
         # Priority order:
         # 1. Explicit column definitions (subqueries that specifically select the column)
@@ -479,14 +504,14 @@ class SelectAnalyzer:
                     _, _, result = remaining_sources[0]
                     return result
                 elif len(remaining_sources) == 0:
-                    return [ColumnOrigin(table=None, column=name, expression_chain=name)]
+                    return [ColumnOrigin(table=None, column=name, trace=(TraceStep(name),))]
             
             # Apply conservative logic to FROM sources when they're unknown tables
             first_alias, first_src = sources[0] if sources else (None, None)
             if (first_src and isinstance(first_src, TableSource) and 
                 not first_src.schema.columns(first_src.table_name)):
                 # FROM source is unknown table - be conservative if no elimination helped
-                return [ColumnOrigin(table=None, column=name, expression_chain=name)]
+                return [ColumnOrigin(table=None, column=name, trace=(TraceStep(name),))]
             
             # FROM source has schema or is SelectSource - trust it
             concrete = [o for o in from_source_results if o.table or o.column]
@@ -537,12 +562,12 @@ class SelectAnalyzer:
                 else:
                     # Multiple sources remain or none remain - be conservative
                     # For JOINs with multiple unknown tables, we can't definitively determine the source
-                    return [ColumnOrigin(table=None, column=name, expression_chain=name)]
+                    return [ColumnOrigin(table=None, column=name, trace=(TraceStep(name),))]
             
             # If no sources claim to have the column, fall back to conservative approach
-            return [ColumnOrigin(table=None, column=name, expression_chain=name)]
+            return [ColumnOrigin(table=None, column=name, trace=(TraceStep(name),))]
         else:
-            return [ColumnOrigin(table=None, column=name, expression_chain=name)]
+            return [ColumnOrigin(table=None, column=name, trace=(TraceStep(name),))]
     
     def _source_explicitly_defines_column(self, src: SourceBase, column_name: str) -> bool:
         """Check if a source explicitly defines a column (vs having it implicitly available)."""
@@ -795,23 +820,30 @@ class SelectAnalyzer:
             current_expr_sql = expr_sql(col, self.dialect)
             enhanced_origins = []
             for origin in origins:
-                if origin.expression_chain and current_expr_sql != origin.expression_chain:
-                    new_chain = f"{origin.expression_chain}~{current_expr_sql}"
-                elif current_expr_sql:
-                    new_chain = current_expr_sql
+                new_step = TraceStep(expression=current_expr_sql)
+                if origin.trace:
+                     last = origin.trace[-1]
+                     if last.expression == current_expr_sql:
+                         new_trace = origin.trace
+                     else:
+                         new_trace = origin.trace + (new_step,)
                 else:
-                    new_chain = origin.expression_chain
+                    new_trace = (new_step,)
                 
                 # Append condition_sql if different from current chain end
                 if condition_sql and condition_sql != current_expr_sql:
-                     # Avoid duplicating if condition_sql is already at the end (unlikely but safe)
-                     if not new_chain.endswith(condition_sql):
-                         new_chain = f"{new_chain}~{condition_sql}"
+                     # Add condition as a separate trace step
+                     cond_step = TraceStep(expression=condition_sql)
+                     # Check redundancy
+                     if new_trace and new_trace[-1].expression == condition_sql:
+                         pass
+                     else:
+                         new_trace = new_trace + (cond_step,)
                 
                 enhanced_origins.append(ColumnOrigin(
                     table=origin.table,
                     column=origin.column,
-                    expression_chain=new_chain,
+                    trace=new_trace,
                     path=origin.path
                 ))
             

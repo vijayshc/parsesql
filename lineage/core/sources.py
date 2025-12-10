@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Sequence
 
 from sqlglot import expressions as exp
 
-from .origin import ColumnOrigin
+from .origin import ColumnOrigin, TraceStep
 from .schema import Schema, _norm
 
 
@@ -37,14 +37,14 @@ class TableSource(SourceBase):
         if table_columns:
             # Table is in schema - only return column if it exists in schema
             if normalized_name in [_norm(col) for col in table_columns]:
-                return [ColumnOrigin(table=self.table_name, column=normalized_name, expression_chain=normalized_name, path=(self.table_name,))]
+                return [ColumnOrigin(table=self.table_name, column=normalized_name, trace=(TraceStep(normalized_name),), path=(self.table_name,))]
             else:
                 # Table exists in schema but column doesn't - return empty
                 return []
         else:
             # Table not in schema - conservatively assume it might have the column
             # This preserves backward compatibility but allows for better disambiguation
-            return [ColumnOrigin(table=self.table_name, column=normalized_name, expression_chain=normalized_name, path=(self.table_name,))]
+            return [ColumnOrigin(table=self.table_name, column=normalized_name, trace=(TraceStep(normalized_name),), path=(self.table_name,))]
 
 
 @dataclass
@@ -164,7 +164,7 @@ class SelectSource(SourceBase):
                     # We can infer the requested column comes from this source
                     table_name = el.origins[0].table
                     if table_name:
-                        result = [ColumnOrigin(table=table_name, column=name, expression_chain=name, path=(table_name,))]
+                        result = [ColumnOrigin(table=table_name, column=name, trace=(TraceStep(name),), path=(table_name,))]
                         break
         
         if result and self.name:
@@ -175,7 +175,7 @@ class SelectSource(SourceBase):
                 new_result.append(ColumnOrigin(
                     table=o.table,
                     column=o.column,
-                    expression_chain=o.expression_chain,
+                    trace=o.trace,
                     path=new_path
                 ))
             return new_result

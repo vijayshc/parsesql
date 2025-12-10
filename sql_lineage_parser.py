@@ -21,7 +21,8 @@ def write_csv(path: str, rows: List[LineageRecord]) -> None:
 		writer = csv.writer(f)
 		writer.writerow(CSV_HEADER)
 		for r in rows:
-			writer.writerow(r.as_csv_row())
+			for sub_row in r.as_csv_rows():
+				writer.writerow(sub_row)
 
 
 def write_join_csv(path: str, rows: List[JoinConditionRecord]) -> None:
@@ -30,7 +31,6 @@ def write_join_csv(path: str, rows: List[JoinConditionRecord]) -> None:
 		writer.writerow(JOIN_CSV_HEADER)
 		for r in rows:
 			writer.writerow(r.as_csv_row())
-
 
 
 
@@ -192,7 +192,7 @@ def main() -> int:
 	for r in all_records:
 		print(
 			f"source_table={r.source_table}, source_column={r.source_column}, "
-			f"expression={r.expression}, target_column={r.target_column}, target_table={r.target_table}, file={r.file}"
+			f"trace={r.trace}, target_column={r.target_column}, target_table={r.target_table}, file={r.file}"
 		)
 
 	write_csv(args.output, all_records)
