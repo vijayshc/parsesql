@@ -116,9 +116,16 @@ class SelectSource(SourceBase):
                     idx[origin.column] = [origin]
         
         # If no outputs were generated, create a synthetic column for star expansion fallback
+        # If no outputs were generated, check if we have a star expansion
         if not outputs and expr_lineages:
-            outputs = ['col_0']
-            if expr_lineages:
+            # Check for unresolved star expansion
+            star_lineage = next((el for el in expr_lineages if el.expression_sql == '*' and not el.output_column), None)
+            if star_lineage:
+                outputs = ['*']
+                idx['*'] = list(star_lineage.origins)
+            else:
+                # Fallback to synthetic column
+                outputs = ['col_0']
                 idx['col_0'] = list(expr_lineages[0].origins) if expr_lineages[0].origins else []
         
         # preserve order; remove duplicates

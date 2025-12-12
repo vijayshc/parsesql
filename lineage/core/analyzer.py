@@ -255,9 +255,22 @@ class SelectAnalyzer:
                 col_name = _norm(col)
                 # Handle placeholder '*' from sources with unknown schema
                 if col_name == '*':
+                    # Try to resolve '*' from the source directly first to preserve lineage
+                    resolved_star = src.resolve_column('*')
+                    if resolved_star:
+                         origins.append(ExpressionLineage(
+                            expression_sql='*',
+                            output_column=None,
+                            origins=tuple(resolved_star)
+                         ))
+                         continue
+
                     # Create a demand-responsive lineage entry for unknown schema tables
                     # This allows the SelectSource to handle column requests dynamically
                     table_name = getattr(src, 'table_name', None)
+                    if not table_name:
+                         table_name = getattr(src, 'name', None) or alias
+                    
                     origins.append(ExpressionLineage(
                         expression_sql='*', 
                         output_column=None,  # No specific output column - demand-driven
@@ -400,6 +413,24 @@ class SelectAnalyzer:
                 if a == alias:
                     r = src.resolve_column(name)
                     return r or [ColumnOrigin(table=None, column=name)]
+            
+            # Fallback: Reference to undefined alias (possible typo or copy-paste error)
+            # Try to resolve against available sources ignoring the invalid alias
+            loose_matches = []
+            seen_match = set()
+            for a, src in sources:
+                r = src.resolve_column(name)
+                # Only consider if we found actual lineage
+                concrete = [o for o in r if o.table or o.column]
+                for o in concrete:
+                    k = o.as_key()
+                    if k not in seen_match:
+                        seen_match.add(k)
+                        loose_matches.append(o)
+            
+            if loose_matches:
+                return loose_matches
+
             return [ColumnOrigin(table=None, column=name)]
         # unqualified
         # unqualified
@@ -489,6 +520,7 @@ class SelectAnalyzer:
                         output_cols = src.output_columns()
                         normalized_name = _norm(name)
                         if (output_cols and 
+                            '*' not in output_cols and
                             not any(_norm(col) == normalized_name for col in output_cols) and
                             not any(col.startswith('col_') for col in output_cols)):
                             sources_definitely_not_having_column.append((alias, src))
@@ -542,6 +574,7 @@ class SelectAnalyzer:
                     output_cols = src.output_columns()
                     normalized_name = _norm(name)
                     if (output_cols and 
+                        '*' not in output_cols and
                         not any(_norm(col) == normalized_name for col in output_cols) and
                         not any(col.startswith('col_') for col in output_cols)):  # Not placeholder columns
                         sources_definitely_not_having_column.append((alias, src))
