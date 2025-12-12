@@ -164,8 +164,7 @@ class SelectSource(SourceBase):
                 if (el.expression_sql == '*' and 
                     not el.output_column and  # Demand-driven (no specific output)
                     el.origins and 
-                    len(el.origins) == 1 and 
-                    el.origins[0].column == '*'):
+                    all(o.column == '*' for o in el.origins)):
                     
                     # This is a demand-responsive star expansion
                     # We can infer the requested column comes from this source
