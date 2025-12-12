@@ -220,8 +220,18 @@ class LineageExtractor:
             if isinstance(expression, (exp.Select, exp.Union)):
                 target_table = None
                 this_arg = core_stmt.this
+                target_cols = []
                 if isinstance(this_arg, exp.Table):
                     target_table = self._table_name(this_arg)
+                elif isinstance(this_arg, exp.Schema):
+                    if isinstance(this_arg.this, exp.Table):
+                          target_table = self._table_name(this_arg.this)
+                    # Extract target columns from schema definition
+                    for e in this_arg.expressions:
+                        if isinstance(e, exp.Identifier):
+                            target_cols.append(_norm(e.this))
+                        elif isinstance(e, exp.Column):
+                            target_cols.append(_norm(e.name))
                 
                 # Handle WITH clauses within the CTAS SELECT expression
                 ctas_env = env
@@ -258,9 +268,11 @@ class LineageExtractor:
                                 ExpressionLineage(expression_sql='*', output_column=c, origins=(ColumnOrigin(table=base_tables[0], column=c),))
                                 for c in cols
                             ]
-                for el in expr_lineages:
+                for idx, el in enumerate(expr_lineages):
                     # Determine target column: alias/output name else first origin column
                     tgt_col = el.output_column
+                    if target_cols and idx < len(target_cols):
+                         tgt_col = target_cols[idx]
                     if not tgt_col:
                         if el.origins and el.origins[0].column:
                             tgt_col = el.origins[0].column
