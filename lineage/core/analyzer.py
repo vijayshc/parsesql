@@ -774,6 +774,7 @@ class SelectAnalyzer:
                     should_record = True
                 
                 if should_record:
+# print(f"DEBUG: Found join in {source_cte or 'top'}: {join_tables} for target {target_col}")
                     join_table_list = sorted(list(join_tables))
                     if len(join_table_list) >= 2:
                         # Normal join with 2 different tables

@@ -165,6 +165,9 @@ class LineageExtractor:
                             source_cte=j.source_cte
                         )
                         remapped_joins.append(new_j)
+# print(f"DEBUG: Remapped join {new_j.left_table}-{new_j.right_table} for {target_col} (source_cte={j.source_cte})")
+                        
+# print(f"DEBUG: Total remapped joins: {len(remapped_joins)}")
         
         return {
             'lineage': all_rows,
