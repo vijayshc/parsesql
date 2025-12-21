@@ -12,16 +12,16 @@ from lineage_chain_processor import LineageChainProcessor
 def create_test_csv(filename: str, content: str):
     """Helper to create test CSV files."""
     with open(filename, 'w') as f:
-        f.write("source_table,source_column,expression,target_column,target_table,file\n")
+        f.write("File_name,Target_table,Target_Column,Source_Table,Source_column,Expression,Trace_level,Lineage_type\n")
         f.write(content)
 
 
 def test_scenario_1_simple_linear_chain():
     """Test 1: Simple linear chain A -> B -> C"""
     print("Test 1: Simple linear chain")
-    content = """source_a,col1,col1,col1,table_b,test1.sql
-table_b,col1,col1,col1,table_c,test1.sql
-table_c,col1,col1,final_col,,test1.sql"""
+    content = """test1.sql,table_b,col1,source_a,col1,col1,0,SELECT
+test1.sql,table_c,col1,table_b,col1,col1,0,SELECT
+test1.sql,,final_col,table_c,col1,col1,0,SELECT"""
     
     create_test_csv('test1.csv', content)
     processor = LineageChainProcessor('test1.csv')
@@ -47,9 +47,9 @@ table_c,col1,col1,final_col,,test1.sql"""
 def test_scenario_2_multiple_sources_single_target():
     """Test 2: Multiple sources feeding into single target"""
     print("Test 2: Multiple sources to single target")
-    content = """source_a,col1,col1,merged_col,,test2.sql
-source_b,col2,col2,merged_col,,test2.sql
-source_c,col3,col3,merged_col,,test2.sql"""
+    content = """test2.sql,,merged_col,source_a,col1,col1,0,SELECT
+test2.sql,,merged_col,source_b,col2,col2,0,SELECT
+test2.sql,,merged_col,source_c,col3,col3,0,SELECT"""
     
     create_test_csv('test2.csv', content)
     processor = LineageChainProcessor('test2.csv')
@@ -73,9 +73,9 @@ source_c,col3,col3,merged_col,,test2.sql"""
 def test_scenario_3_single_source_multiple_targets():
     """Test 3: Single source feeding multiple targets"""
     print("Test 3: Single source to multiple targets")
-    content = """source_table,base_col,base_col,target1,,test3.sql
-source_table,base_col,base_col,target2,,test3.sql
-source_table,base_col,UPPER(base_col),target3,,test3.sql"""
+    content = """test3.sql,,target1,source_table,base_col,base_col,0,SELECT
+test3.sql,,target2,source_table,base_col,base_col,0,SELECT
+test3.sql,,target3,source_table,base_col,UPPER(base_col),0,SELECT"""
     
     create_test_csv('test3.csv', content)
     processor = LineageChainProcessor('test3.csv')
@@ -99,11 +99,11 @@ source_table,base_col,UPPER(base_col),target3,,test3.sql"""
 def test_scenario_4_complex_branching():
     """Test 4: Complex branching - tree structure"""
     print("Test 4: Complex branching tree")
-    content = """root_table,root_col,root_col,col1,branch_a,test4.sql
-root_table,root_col,root_col,col1,branch_b,test4.sql
-branch_a,col1,col1,final_a,,test4.sql
-branch_a,col1,TRANSFORM(col1),final_a_transformed,,test4.sql
-branch_b,col1,col1,final_b,,test4.sql"""
+    content = """test4.sql,branch_a,col1,root_table,root_col,root_col,0,SELECT
+test4.sql,branch_b,col1,root_table,root_col,root_col,0,SELECT
+test4.sql,,final_a,branch_a,col1,col1,0,SELECT
+test4.sql,,final_a_transformed,branch_a,col1,TRANSFORM(col1),0,SELECT
+test4.sql,,final_b,branch_b,col1,col1,0,SELECT"""
     
     create_test_csv('test4.csv', content)
     processor = LineageChainProcessor('test4.csv')
@@ -124,11 +124,11 @@ branch_b,col1,col1,final_b,,test4.sql"""
 def test_scenario_5_deep_chain():
     """Test 5: Deep chain (5 levels)"""
     print("Test 5: Deep chain (5 levels)")
-    content = """level1,col,col,col,level2,test5.sql
-level2,col,col,col,level3,test5.sql
-level3,col,col,col,level4,test5.sql
-level4,col,col,col,level5,test5.sql
-level5,col,col,final_col,,test5.sql"""
+    content = """test5.sql,level2,col,level1,col,col,0,SELECT
+test5.sql,level3,col,level2,col,col,0,SELECT
+test5.sql,level4,col,level3,col,col,0,SELECT
+test5.sql,level5,col,level4,col,col,0,SELECT
+test5.sql,,final_col,level5,col,col,0,SELECT"""
     
     create_test_csv('test5.csv', content)
     processor = LineageChainProcessor('test5.csv')
@@ -154,10 +154,10 @@ level5,col,col,final_col,,test5.sql"""
 def test_scenario_6_cycle_detection():
     """Test 6: Recursive dependency cycle"""
     print("Test 6: Cycle detection")
-    content = """table_a,col1,col1,col1,table_b,test6.sql
-table_b,col1,col1,col1,table_c,test6.sql
-table_c,col1,col1,col1,table_a,test6.sql
-independent,col2,col2,col2,,test6.sql"""
+    content = """test6.sql,table_b,col1,table_a,col1,col1,0,SELECT
+test6.sql,table_c,col1,table_b,col1,col1,0,SELECT
+test6.sql,table_a,col1,table_c,col1,col1,0,SELECT
+test6.sql,,col2,independent,col2,col2,0,SELECT"""
     
     create_test_csv('test6.csv', content)
     processor = LineageChainProcessor('test6.csv')
@@ -174,10 +174,10 @@ independent,col2,col2,col2,,test6.sql"""
 def test_scenario_7_diamond_pattern():
     """Test 7: Diamond dependency pattern"""
     print("Test 7: Diamond pattern")
-    content = """source,col,col,left_col,left_table,test7.sql
-source,col,col,right_col,right_table,test7.sql
-left_table,left_col,left_col,final_col,,test7.sql
-right_table,right_col,right_col,final_col,,test7.sql"""
+    content = """test7.sql,left_table,left_col,source,col,col,0,SELECT
+test7.sql,right_table,right_col,source,col,col,0,SELECT
+test7.sql,,final_col,left_table,left_col,left_col,0,SELECT
+test7.sql,,final_col,right_table,right_col,right_col,0,SELECT"""
     
     create_test_csv('test7.csv', content)
     processor = LineageChainProcessor('test7.csv')
@@ -202,8 +202,8 @@ right_table,right_col,right_col,final_col,,test7.sql"""
 def test_scenario_8_no_ultimate_source():
     """Test 8: Columns with no clear ultimate source (constants)"""
     print("Test 8: Constants and derived columns")
-    content = """,,'constant_value',const_col,,test8.sql
-derived_table,col1,col1 + 100,calculated_col,,test8.sql"""
+    content = """test8.sql,,const_col,,,'constant_value',0,SELECT
+test8.sql,,calculated_col,derived_table,col1,col1 + 100,0,SELECT"""
     
     create_test_csv('test8.csv', content)
     processor = LineageChainProcessor('test8.csv')
@@ -220,11 +220,11 @@ derived_table,col1,col1 + 100,calculated_col,,test8.sql"""
 def test_scenario_9_mixed_patterns():
     """Test 9: Mixed patterns in same dataset"""
     print("Test 9: Mixed patterns")
-    content = """base1,col1,col1,col1,intermediate,test9.sql
-base2,col2,col2,col2,intermediate,test9.sql
-intermediate,col1,col1,final1,,test9.sql
-intermediate,col2,col2,final2,,test9.sql
-base3,col3,col3,direct_final,,test9.sql"""
+    content = """test9.sql,intermediate,col1,base1,col1,col1,0,SELECT
+test9.sql,intermediate,col2,base2,col2,col2,0,SELECT
+test9.sql,,final1,intermediate,col1,col1,0,SELECT
+test9.sql,,final2,intermediate,col2,col2,0,SELECT
+test9.sql,,direct_final,base3,col3,col3,0,SELECT"""
     
     create_test_csv('test9.csv', content)
     processor = LineageChainProcessor('test9.csv')
@@ -244,9 +244,9 @@ base3,col3,col3,direct_final,,test9.sql"""
 def test_scenario_10_empty_values():
     """Test 10: Empty/null values handling"""
     print("Test 10: Empty values handling")
-    content = """source_table,col1,col1,target1,,test10.sql
-,col2,col2,target2,,test10.sql
-source_table,,expression,target3,,test10.sql"""
+    content = """test10.sql,,target1,source_table,col1,col1,0,SELECT
+test10.sql,,target2,,col2,col2,0,SELECT
+test10.sql,,target3,source_table,,expression,0,SELECT"""
     
     create_test_csv('test10.csv', content)
     processor = LineageChainProcessor('test10.csv')
@@ -268,12 +268,12 @@ def test_scenario_11_large_scale():
     lines = []
     # Create a fan-out pattern: 1 source -> 10 intermediate -> 100 final
     for i in range(10):
-        lines.append(f"source,base_col,base_col,col{i},intermediate{i},test11.sql")
+        lines.append(f"test11.sql,intermediate{i},col{i},source,base_col,base_col,0,SELECT")
     
     for i in range(10):
         for j in range(10):
             final_idx = i * 10 + j
-            lines.append(f"intermediate{i},col{i},col{i},final{final_idx},,test11.sql")
+            lines.append(f"test11.sql,,final{final_idx},intermediate{i},col{i},col{i},0,SELECT")
     
     content = "\n".join(lines)
     create_test_csv('test11.csv', content)
@@ -301,9 +301,9 @@ def test_scenario_11_large_scale():
 def test_scenario_12_self_reference():
     """Test 12: Self-referencing table (should be handled gracefully)"""
     print("Test 12: Self-reference handling")
-    content = """base_table,col1,col1,col1,self_ref_table,test12.sql
-self_ref_table,col1,col1 + 1,col1,self_ref_table,test12.sql
-self_ref_table,col1,col1,final_col,,test12.sql"""
+    content = """test12.sql,self_ref_table,col1,base_table,col1,col1,0,SELECT
+test12.sql,self_ref_table,col1,self_ref_table,col1,col1 + 1,0,SELECT
+test12.sql,,final_col,self_ref_table,col1,col1,0,SELECT"""
     
     create_test_csv('test12.csv', content)
     processor = LineageChainProcessor('test12.csv')

@@ -25,13 +25,13 @@ class LineageRecord:
         # But if not, we should probably output blank expression/alias/level?
         if not self.trace:
             return [[
+                self.file or "",
+                self.target_table or "",
+                self.target_column or "",
                 self.source_table or "",
                 self.source_column or "",
                 "", # expression
                 "1", # trace_level
-                self.target_column or "",
-                self.target_table or "",
-                self.file or "",
                 self.lineage_type,
             ]]
         
@@ -44,13 +44,13 @@ class LineageRecord:
             summary_parts.append(expr)
         summary_expr = "~".join(summary_parts)
         rows.append([
+            self.file or "",
+            self.target_table or "",
+            self.target_column or "",
             self.source_table or "",
             self.source_column or "",
             summary_expr,
             "0",          # trace_level
-            self.target_column or "",
-            self.target_table or "",
-            self.file or "",
             self.lineage_type,
         ])
         
@@ -60,13 +60,13 @@ class LineageRecord:
                 expr = f"{expr} as {step.alias}"
             
             rows.append([
+                self.file or "",
+                self.target_table or "",
+                self.target_column or "",
                 self.source_table or "",
                 self.source_column or "",
                 expr,
                 str(len(self.trace) - i), # trace_level, descending (1 = final step)
-                self.target_column or "",
-                self.target_table or "",
-                self.file or "",
                 self.lineage_type,
             ])
         return rows
@@ -98,14 +98,14 @@ class JoinConditionRecord:
 
 
 CSV_HEADER = [
-    "source_table",
-    "source_column",
-    "expression",
-    "trace_level",
-    "target_column",
-    "target_table",
-    "file",
-    "lineage_type",
+    "File_name",
+    "Target_table",
+    "Target_Column",
+    "Source_Table",
+    "Source_column",
+    "Expression",
+    "Trace_level",
+    "Lineage_type",
 ]
 
 JOIN_CSV_HEADER = [

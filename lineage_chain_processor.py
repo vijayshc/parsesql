@@ -62,20 +62,20 @@ class LineageChainProcessor:
         with open(self.csv_file, 'r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
             for row in reader:
-                # Filter for trace_level 0 (summary row) if trace_level exists in CSV
-                # Older CSVs might not have trace_level, so we default to processing if missing
-                if 'trace_level' in row and row['trace_level'] != '0':
+                # Filter for Trace_level 0 (summary row) if Trace_level exists in CSV
+                # Older CSVs might not have Trace_level, so we default to processing if missing
+                if 'Trace_level' in row and row['Trace_level'] != '0':
                     continue
-                if 'lineage_type' in row and row['lineage_type'] != 'SELECT':
+                if 'Lineage_type' in row and row['Lineage_type'] != 'SELECT':
                     continue
                     
                 record = LineageRecord(
-                    source_table=row['source_table'].strip() if row['source_table'] else '',
-                    source_column=row['source_column'].strip() if row['source_column'] else '',
-                    expression=row['expression'].strip() if row['expression'] else '',
-                    target_column=row['target_column'].strip() if row['target_column'] else '',
-                    target_table=row['target_table'].strip() if row['target_table'] else '',
-                    file=row['file'].strip() if row['file'] else ''
+                    source_table=row['Source_Table'].strip() if row.get('Source_Table') else '',
+                    source_column=row['Source_column'].strip() if row.get('Source_column') else '',
+                    expression=row['Expression'].strip() if row.get('Expression') else '',
+                    target_column=row['Target_Column'].strip() if row.get('Target_Column') else '',
+                    target_table=row['Target_table'].strip() if row.get('Target_table') else '',
+                    file=row['File_name'].strip() if row.get('File_name') else ''
                 )
                 self.records.append(record)
     
@@ -323,7 +323,7 @@ class LineageChainProcessor:
         """Write lineage steps to output file."""
         with open(output_file, 'w', encoding='utf-8') as f:
             # Write header
-            f.write("source_table,source_column,expression,target_table,target_column,ultimate_source_table,ultimate_source_column,ultimate_target_table,ultimate_target_column,level_top_to_bottom,level_bottom_to_top,file\n")
+            f.write("Source_Table,Source_column,Expression,Target_table,Target_Column,ultimate_source_table,ultimate_source_column,ultimate_target_table,ultimate_target_column,level_top_to_bottom,level_bottom_to_top,File_name\n")
             
             # Write steps
             for step in steps:
