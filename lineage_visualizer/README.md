@@ -69,20 +69,22 @@ Open `index.html` directly in a modern web browser. Note: Some features may be l
 5. **Export**: Click "Download PNG" to save the current view
 
 ### CSV Format Requirements
-The input CSV must contain these columns:
-- `source_table`: Source table name
-- `source_column`: Source column name
-- `expression`: SQL expression (optional)
-- `target_column`: Target column name
-- `target_table`: Target table name
-- `file`: Source file path (optional)
+The input CSV must contain these columns (case-insensitive):
+- `File_name`: Source file path
+- `Target_table`: Target table name
+- `Target_Column`: Target column name
+- `Source_Table`: Source table name
+- `Source_column`: Source column name
+- `Expression`: SQL expression
+- `Trace_level`: Lineage depth (summary rows where level=0 are prioritized)
+- `Lineage_type`: Type of lineage (e.g., SELECT, WHERE)
 
 ### Example CSV Data
 ```csv
-source_table,source_column,expression,target_column,target_table,file
-orders,customer_id,,customer_id,customer_orders,
-customers,first_name,,first_name,customer_orders,
-orders,total_amount,,total_amount,customer_orders,
+File_name,Target_table,Target_Column,Source_Table,Source_column,Expression,Trace_level,Lineage_type
+orders.sql,customer_orders,customer_id,orders,customer_id,customer_id,0,SELECT
+customers.sql,customer_orders,first_name,customers,first_name,first_name,0,SELECT
+orders.sql,customer_orders,total_amount,orders,total_amount,total_amount,0,SELECT
 ```
 
 ## API Reference

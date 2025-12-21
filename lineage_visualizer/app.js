@@ -1,5 +1,5 @@
 (function () {
-  const REQUIRED_COLUMNS = ["source_table", "source_column", "expression", "target_column", "target_table", "file"];
+  const REQUIRED_COLUMNS = ["source_table", "source_column", "expression", "target_column", "target_table", "file_name"];
   const THEME_STORAGE_KEY = "lineage-theme";
 
   const state = {
@@ -281,9 +281,9 @@
 
     currentFileName = filename;
 
-  refs.searchInput.value = "";
-  renderCards();
-  drawConnections();
+    refs.searchInput.value = "";
+    renderCards();
+    drawConnections();
     toggleEmptyState(false);
     updateStats(state.columnCount, state.edges.length, filename);
 
@@ -307,8 +307,8 @@
     currentFileName = "";
     refs.cardsContainer.innerHTML = "";
     refs.connectionsLayer.innerHTML = "";
-  delete refs.cardsContainer.dataset.minWidth;
-  delete refs.cardsContainer.dataset.minHeight;
+    delete refs.cardsContainer.dataset.minWidth;
+    delete refs.cardsContainer.dataset.minHeight;
     updateStats(0, 0, "No file loaded");
     toggleEmptyState(true);
     resetInspector();
@@ -322,13 +322,13 @@
     const adjacencyUp = new Map();
     const adjacencyDown = new Map();
     const edgeMap = new Map();
-  const edges = [];
-  const warnings = [];
-  const edgeKeys = new Set();
-  let missingTargetColumnCount = 0;
-  let missingSourceColumnCount = 0;
-  let fallbackTargetTableCount = 0;
-  let fallbackSourceTableCount = 0;
+    const edges = [];
+    const warnings = [];
+    const edgeKeys = new Set();
+    let missingTargetColumnCount = 0;
+    let missingSourceColumnCount = 0;
+    let fallbackTargetTableCount = 0;
+    let fallbackSourceTableCount = 0;
 
     const ensureGroup = (table) => {
       const key = table.toLowerCase();
@@ -383,6 +383,15 @@
     };
 
     rows.forEach((row, index) => {
+      // Filter for Trace_level 0 (summary row) if Trace_level exists in CSV
+      if (row.trace_level && row.trace_level !== "0") {
+        return;
+      }
+      // Only process SELECT lineage for the main visualization
+      if (row.lineage_type && row.lineage_type !== "SELECT") {
+        return;
+      }
+
       const record = normalizeRecord(row);
 
       let targetTable = record.targetTable;
@@ -458,7 +467,7 @@
       expression: normalise(row.expression),
       targetColumn: normalise(row.target_column),
       targetTable: normalise(row.target_table),
-      file: normalise(row.file)
+      file: normalise(row.file_name)
     };
   }
 
@@ -524,9 +533,9 @@
       card.style.left = `${group.position.x}px`;
       card.style.top = `${group.position.y}px`;
       card.style.width = `${group.width}px`;
-  card.dataset.baseLeft = String(group.position.x);
-  card.dataset.baseTop = String(group.position.y);
-  card.dataset.baseWidth = String(group.width);
+      card.dataset.baseLeft = String(group.position.x);
+      card.dataset.baseTop = String(group.position.y);
+      card.dataset.baseWidth = String(group.width);
 
       const header = document.createElement("header");
       header.textContent = group.label;
@@ -968,9 +977,9 @@
     applyLabelClass(upstream.edges, "edge-upstream");
     applyLabelClass(downstream.edges, "edge-downstream");
 
-  const directUp = state.adjacency.upstream.get(nodeId) || new Set();
-  const directDown = state.adjacency.downstream.get(nodeId) || new Set();
-  applyLabelClass(new Set([...directUp, ...directDown]), "edge-selected");
+    const directUp = state.adjacency.upstream.get(nodeId) || new Set();
+    const directDown = state.adjacency.downstream.get(nodeId) || new Set();
+    applyLabelClass(new Set([...directUp, ...directDown]), "edge-selected");
 
     document.querySelectorAll(".column-row").forEach((row) => {
       if (!row.classList.contains("selected") && !row.classList.contains("upstream") && !row.classList.contains("downstream")) {

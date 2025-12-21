@@ -11,7 +11,7 @@ REQUIRED_COLUMNS: Sequence[str] = (
     "expression",
     "target_column",
     "target_table",
-    "file",
+    "file_name",
 )
 
 
@@ -75,6 +75,13 @@ def transform_records(records: Iterable[Mapping[str, str]]) -> LineageGraph:
     warnings: list[str] = []
 
     for index, raw in enumerate(records, start=1):
+        # Filter for Trace_level 0 (summary row) if Trace_level exists in CSV
+        if raw.get("trace_level") and raw.get("trace_level") != "0":
+            continue
+        # Only process SELECT lineage for the main visualization
+        if raw.get("lineage_type") and raw.get("lineage_type") != "SELECT":
+            continue
+
         row = _normalise_row(raw)
 
         if not row["target_column"]:
@@ -195,7 +202,7 @@ def _normalise_row(row: Mapping[str, str]) -> dict[str, str]:
         "expression": _normalise_cell(lookup.get("expression")),
         "target_column": _normalise_cell(lookup.get("target_column")),
         "target_table": _normalise_cell(lookup.get("target_table")),
-        "file": _normalise_cell(lookup.get("file")),
+        "file": _normalise_cell(lookup.get("file_name")),
     }
 
 
